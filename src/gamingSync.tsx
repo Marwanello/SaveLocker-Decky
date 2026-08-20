@@ -1,12 +1,11 @@
-import { useEffect, useState } from 'react'
-import {
-  ButtonItem, DropdownItem, Field, PanelSection, PanelSectionRow, TextField, ToggleField,
-} from '@decky/ui'
+import { useState } from 'react'
+import { PanelSection, PanelSectionRow, ToggleField } from '@decky/ui'
 import { callable, toaster } from '@decky/api'
 
 /**
- * Gaming Mode launch/close detection, and the per-game settings UI it depends on — split out of
- * index.tsx (already ~800 lines without this) rather than folded in.
+ * Gaming Mode launch/close detection — split out of index.tsx (already ~800 lines without this)
+ * rather than folded in. The per-game alias/pull-enabled UI this depends on lives on the full-screen
+ * page now (fullPage.tsx), not here; this file owns the detection logic and the one global toggle.
  *
  * This is deliberately NOT the same guarantee the launch-option wrapper gives (see index.tsx's
  * `applyAll`): that one runs pull before the game binary exists at all. This one reacts to
@@ -20,14 +19,6 @@ import { callable, toaster } from '@decky/api'
  * hands-off entirely — running a second pull/push here would race the wrapper's own sync rather
  * than back it up.
  */
-
-/** Same D-pad-focusable-row trick as index.tsx's `ReadOnlyRow` — duplicated rather than imported
- * to avoid a circular import between this module and index.tsx. */
-const ReadOnlyRow = ({ children }: { children: React.ReactNode }) => (
-  <Field focusable={true} bottomSeparator="none" childrenLayout="below" childrenContainerWidth="max">
-    {children}
-  </Field>
-)
 
 interface GamingSyncRow {
   steamAppId: number
@@ -48,11 +39,9 @@ const fetchRowsForSync = callable<[], Result<GamingSyncRow[]>>('rows')
 const fetchGamesForSync = callable<[], Result<GamingSyncGame[]>>('games')
 const runSyncForGaming =
   callable<[string, string | null, boolean], Result<{ exitCode: number; output: string }>>('sync')
-const setAlias = callable<[string, string | null], Result<null>>('set_alias')
 const fetchGamingSyncEnabled = callable<[], boolean>('gaming_sync_enabled')
 const persistGamingSyncEnabled = callable<[boolean], void>('set_gaming_sync_enabled')
 const fetchPullOverrides = callable<[], Record<string, boolean>>('gaming_pull_overrides')
-const persistPullEnabled = callable<[string, boolean | null], void>('set_gaming_pull_enabled')
 
 // Module scope, not React state: this needs to be read from a SteamClient callback that fires
 // outside any component's lifetime, same reasoning as index.tsx's `stickyTarget`.
@@ -96,7 +85,7 @@ async function resolveMatch(
  * else off for a game with a resolved Steam AppID (so this never fights Steam's own Cloud sync for
  * an ordinary Steam library game) and on otherwise.
  */
-function resolvePullEnabled(
+export function resolvePullEnabled(
   overrides: Record<string, boolean>,
   gameId: string,
   isSteamGame: boolean,
@@ -180,125 +169,5 @@ export function GamingSyncSettings() {
   )
 }
 
-// Sticky across the QAM's dropdown-open remount, same reasoning and shape as index.tsx's
-// `stickyTarget` for the Sync panel's own target picker.
-let stickyGameId: string | null = null
-
-/**
- * One game picker driving two per-game settings: the name-match alias, and whether Gaming Mode's
- * pre-launch pull runs for it at all. Combined rather than two separate pickers so choosing the game
- * once is enough to see and edit both.
- */
-export function GameSyncSettings({ rows, games }: { rows: GamingSyncRow[]; games: GamingSyncGame[] }) {
-  const [gameId, setGameIdState] = useState<string | null>(stickyGameId)
-  const setGameId = (id: string | null) => { stickyGameId = id; setGameIdState(id) }
-  const [editingAlias, setEditingAlias] = useState(false)
-  const [draft, setDraft] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [overrides, setOverrides] = useState<Record<string, boolean>>({})
-
-  useEffect(() => { void fetchPullOverrides().then(setOverrides) }, [])
-
-  const selected = games.find((g) => g.gameId === gameId) ?? games[0] ?? null
-
-  if (!selected) {
-    return (
-      <PanelSection title="Game settings">
-        <PanelSectionRow><ReadOnlyRow>No tracked games yet.</ReadOnlyRow></PanelSectionRow>
-      </PanelSection>
-    )
-  }
-
-  const isSteamGame = rows.some((r) => r.gameId === selected.gameId)
-  const pullEnabled = resolvePullEnabled(overrides, selected.gameId, isSteamGame)
-
-  // The effective value IS the name when no override is set — that's what matching actually falls
-  // back to, so showing anything else here would misrepresent what Gaming Mode sync will compare.
-  const effectiveAlias = selected.alias ?? selected.name
-
-  const startEditAlias = () => {
-    setDraft(effectiveAlias)
-    setEditingAlias(true)
-  }
-
-  const saveAlias = async () => {
-    setBusy(true)
-    try {
-      const trimmed = draft.trim()
-      const next = trimmed === '' || trimmed === selected.name ? null : trimmed
-      const r = await setAlias(selected.gameId, next)
-      if (r.ok) {
-        // Optimistic: index.tsx's own 30s status poll refreshes `games` with the server's copy soon
-        // anyway, this just avoids the field visibly reverting until then.
-        selected.alias = next
-        setEditingAlias(false)
-      }
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const setPull = (value: boolean) => {
-    setOverrides((prev) => ({ ...prev, [selected.gameId]: value }))
-    void persistPullEnabled(selected.gameId, value)
-  }
-
-  return (
-    <PanelSection title="Game settings">
-      <PanelSectionRow>
-        <DropdownItem
-          label="Game"
-          rgOptions={games.map((g) => ({ data: g.gameId, label: g.name }))}
-          selectedOption={selected.gameId}
-          onChange={(o: any) => {
-            const picked = o && typeof o === 'object' && 'data' in o ? o.data : o
-            setGameId(picked == null ? null : String(picked))
-            setEditingAlias(false)
-          }}
-        />
-      </PanelSectionRow>
-
-      <PanelSectionRow>
-        <ToggleField
-          label="Pull before launch"
-          description={isSteamGame
-            ? 'Off by default for this game — it has a Steam App ID, so pulling here could fight Steam Cloud.'
-            : 'On by default — no Steam App ID resolved, so there is nothing else already syncing it.'}
-          checked={pullEnabled}
-          onChange={setPull}
-        />
-      </PanelSectionRow>
-
-      {!editingAlias && (
-        <>
-          <PanelSectionRow>
-            <ReadOnlyRow>
-              <span style={{ fontSize: '0.85em' }}>Alias: {effectiveAlias}</span>
-            </ReadOnlyRow>
-          </PanelSectionRow>
-          <PanelSectionRow>
-            <ButtonItem layout="below" onClick={startEditAlias}>Edit alias</ButtonItem>
-          </PanelSectionRow>
-        </>
-      )}
-
-      {editingAlias && (
-        <>
-          <PanelSectionRow>
-            <TextField value={draft} onChange={(e: any) => setDraft(e?.target?.value ?? '')} />
-          </PanelSectionRow>
-          <PanelSectionRow>
-            <ButtonItem layout="below" disabled={busy} onClick={() => void saveAlias()}>
-              {busy ? 'Saving…' : 'Save'}
-            </ButtonItem>
-          </PanelSectionRow>
-          <PanelSectionRow>
-            <ButtonItem layout="below" disabled={busy} onClick={() => setEditingAlias(false)}>
-              Cancel
-            </ButtonItem>
-          </PanelSectionRow>
-        </>
-      )}
-    </PanelSection>
-  )
-}
+// GamingSyncRow/GamingSyncGame stay exported-in-spirit via fullPage.tsx's own equivalent local
+// types (same shape) — this file only needs them for resolveMatch above, not any UI anymore.
