@@ -128,10 +128,42 @@ def _agent_binary() -> str | None:
     return None
 
 
+def _settings_path() -> str:
+    return os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "settings.json")
+
+
+def _read_settings() -> dict:
+    """
+    This plugin's own tiny local settings — Decky's plugin settings dir, not the agent's state
+    directory, so the "read the token; write nothing there" rule above does not apply here. Kept to
+    a single JSON file rather than pulling in a settings-manager dependency for one boolean.
+    """
+    try:
+        with open(_settings_path(), "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _write_settings(settings: dict) -> None:
+    os.makedirs(decky.DECKY_PLUGIN_SETTINGS_DIR, exist_ok=True)
+    with open(_settings_path(), "w", encoding="utf-8") as handle:
+        json.dump(settings, handle)
+
+
 class Plugin:
     async def state(self):
         """Connection, machine, last sync, and any lease warnings this device is holding."""
         return _request("/api/state")
+
+    async def activity(self):
+        """
+        What is syncing right now (with byte progress for a push) and a short rolling history of
+        what just happened — the same feed the agent's own local web UI polls for its Overview page.
+        Cheap: an in-memory read on the agent's side, so this is safe to poll far more often than
+        `state()`.
+        """
+        return _request("/api/activity")
 
     async def agent_version(self):
         """Current version, and whether the agent has a newer one waiting."""
@@ -226,6 +258,44 @@ class Plugin:
     async def games(self):
         """Every game this machine tracks — not just the ones Steam launches."""
         return _request("/api/games")
+
+    async def set_alias(self, game_id: str, alias: str | None):
+        """
+        Set (or clear, with `alias=None`) a game's manual name-match override — the fallback Gaming
+        Mode detection uses for a game whose Steam AppID this agent has not resolved, since the
+        primary match (`rows()`'s `steamAppId`) has nothing to go on for those.
+        """
+        return _request("/api/games/%s/alias" % game_id, {"alias": alias})
+
+    async def gaming_sync_enabled(self):
+        """Whether Gaming Mode launch/close detection should act. On by default."""
+        return _read_settings().get("gamingSyncEnabled", True)
+
+    async def set_gaming_sync_enabled(self, enabled: bool):
+        settings = _read_settings()
+        settings["gamingSyncEnabled"] = enabled
+        _write_settings(settings)
+
+    async def gaming_pull_overrides(self):
+        """
+        Per-game overrides for whether Gaming Mode's pre-launch pull runs at all — post-exit push is
+        never gated by this, only the pull. Keyed by gameId; a game absent here has no override, and
+        the frontend falls back to its own computed default (off for a game with a resolved Steam
+        AppID, so this never fights Steam's own Cloud sync for an ordinary Steam library game; on
+        otherwise). Local to this plugin, not the agent — nothing outside this plugin's own Gaming
+        Mode detection reads it.
+        """
+        return _read_settings().get("pullEnabledOverrides", {})
+
+    async def set_gaming_pull_enabled(self, game_id: str, enabled: bool | None):
+        """`enabled=None` clears the override, reverting that game to the computed default."""
+        settings = _read_settings()
+        overrides = settings.setdefault("pullEnabledOverrides", {})
+        if enabled is None:
+            overrides.pop(game_id, None)
+        else:
+            overrides[game_id] = enabled
+        _write_settings(settings)
 
     async def sync(self, action: str, game: str | None = None, force: bool = False):
         """

@@ -20,6 +20,7 @@ const ReadOnlyRow = ({ children }: { children: React.ReactNode; key?: string | n
 )
 import { callable, definePlugin, toaster } from '@decky/api'
 import { FaGamepad } from 'react-icons/fa'
+import { GameSyncSettings, GamingSyncSettings, registerGamingModeSync } from './gamingSync'
 
 /**
  * SaveLocker's Decky plugin.
@@ -97,6 +98,28 @@ interface TrackedGame {
   gameId: string
   name: string
   saveDirectory: string
+  /** Manual name-match override for Gaming Mode sync's fallback matcher — see `gamingSync.tsx`. */
+  alias: string | null
+}
+
+/** What the agent's `SyncActivityTracker` reports right now, and its short rolling history — the
+ * same feed the agent's own local web UI polls for its Overview page. */
+interface ActivitySnapshot {
+  gameName: string | null
+  phase: 'Idle' | 'Pulling' | 'Settling' | 'Pushing'
+  bytesDone: number
+  bytesTotal: number
+  startedAtUtc: string | null
+}
+
+interface ActivityLogEntry {
+  timestampUtc: string
+  message: string
+}
+
+interface ActivityDto {
+  current: ActivitySnapshot
+  recent: ActivityLogEntry[]
 }
 
 type AgentResult<T> = { ok: true; data: T } | { ok: false; reason: string }
@@ -112,6 +135,7 @@ const fetchVersion = callable<[], AgentResult<AgentVersion>>('agent_version')
 const dismissWarning = callable<[string], AgentResult<null>>('dismiss_warning')
 const runDoctor = callable<[], AgentResult<DoctorResult>>('doctor')
 const restartAgent = callable<[], AgentResult<null>>('restart_agent')
+const fetchActivity = callable<[], AgentResult<ActivityDto>>('activity')
 
 /**
  * A game's launch options as Steam holds them right now.
@@ -504,6 +528,39 @@ function Sync({ games }: { games: TrackedGame[] }) {
     }
   }
 
+  // Pull then push, back to back — a plain "sync it" for someone who doesn't want to think about
+  // which direction they need. Both legs are independently safe (neither can lose data without
+  // `--force`), so a refused/failed pull does not stop the push attempt: they're reported together,
+  // not gated on each other.
+  const syncBoth = async () => {
+    const label = `sync ${targetName}`
+    setBusy(label)
+    setProblem(null)
+    try {
+      const pull = await runSync('pull', target, false)
+      const push = await runSync('push', target, false)
+      if (!pull.ok && !push.ok) {
+        setResult(null)
+        setProblem(pull.reason)
+        return
+      }
+      const lines = [
+        pull.ok ? `pull: exit ${pull.data.exitCode}` : `pull: could not run (${pull.reason})`,
+        pull.ok ? pull.data.output : '',
+        push.ok ? `push: exit ${push.data.exitCode}` : `push: could not run (${push.reason})`,
+        push.ok ? push.data.output : '',
+      ].filter((l) => l.trim() !== '')
+      const exitCode = (pull.ok ? pull.data.exitCode : 1) || (push.ok ? push.data.exitCode : 1)
+      setResult({ label, exitCode, output: lines.join('\n') })
+      toaster.toast({
+        title: 'SaveLocker',
+        body: exitCode === 0 ? `${label} finished` : `${label} finished with issues — see the plugin`,
+      })
+    } finally {
+      setBusy(null)
+    }
+  }
+
   const confirmForce = (action: 'push' | 'pull') => {
     const consequence = action === 'push'
       ? `This replaces the server's copy for ${targetName} with this device's save. Every other machine will pull it.`
@@ -538,25 +595,41 @@ function Sync({ games }: { games: TrackedGame[] }) {
         />
       </PanelSectionRow>
 
+      {/* Push/Force push share a row, Pull/Force pull share a row, and Sync sits alone between
+          them — the plain action next to its destructive variant, with the one-click bidirectional
+          shortcut set apart rather than buried in the same rank as five other buttons. */}
       <PanelSectionRow>
-        <ButtonItem layout="below" disabled={busy !== null} onClick={() => void go('push', false)}>
-          {busy === `push ${targetName}` ? 'Pushing…' : `Push ${targetName}`}
+        <Focusable style={{ display: 'flex', gap: '6px' }}>
+          <div style={{ flex: 1 }}>
+            <ButtonItem layout="below" disabled={busy !== null} onClick={() => void go('push', false)}>
+              {busy === `push ${targetName}` ? 'Pushing…' : 'Push'}
+            </ButtonItem>
+          </div>
+          <div style={{ flex: 1 }}>
+            <ButtonItem layout="below" disabled={busy !== null} onClick={() => confirmForce('push')}>
+              Force push…
+            </ButtonItem>
+          </div>
+        </Focusable>
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <ButtonItem layout="below" disabled={busy !== null} onClick={() => void syncBoth()}>
+          {busy === `sync ${targetName}` ? 'Syncing…' : `Sync ${targetName}`}
         </ButtonItem>
       </PanelSectionRow>
       <PanelSectionRow>
-        <ButtonItem layout="below" disabled={busy !== null} onClick={() => void go('pull', false)}>
-          {busy === `pull ${targetName}` ? 'Pulling…' : `Pull ${targetName}`}
-        </ButtonItem>
-      </PanelSectionRow>
-      <PanelSectionRow>
-        <ButtonItem layout="below" disabled={busy !== null} onClick={() => confirmForce('push')}>
-          {`Force push ${targetName}…`}
-        </ButtonItem>
-      </PanelSectionRow>
-      <PanelSectionRow>
-        <ButtonItem layout="below" disabled={busy !== null} onClick={() => confirmForce('pull')}>
-          {`Force pull ${targetName}…`}
-        </ButtonItem>
+        <Focusable style={{ display: 'flex', gap: '6px' }}>
+          <div style={{ flex: 1 }}>
+            <ButtonItem layout="below" disabled={busy !== null} onClick={() => void go('pull', false)}>
+              {busy === `pull ${targetName}` ? 'Pulling…' : 'Pull'}
+            </ButtonItem>
+          </div>
+          <div style={{ flex: 1 }}>
+            <ButtonItem layout="below" disabled={busy !== null} onClick={() => confirmForce('pull')}>
+              Force pull…
+            </ButtonItem>
+          </div>
+        </Focusable>
       </PanelSectionRow>
 
       {problem && (
@@ -653,6 +726,82 @@ function Diagnostics() {
   )
 }
 
+/**
+ * What the agent is doing right now, right under Status — the "is something happening" answer,
+ * separate from the Activity log's history further down. Hidden entirely at Idle: an empty bar is
+ * worse than no bar, since it invites checking whether it's stuck.
+ */
+function Progress({ activity }: { activity: ActivityDto | null }) {
+  const current = activity?.current
+  if (!current || current.phase === 'Idle') return null
+
+  // Byte progress only ever exists for a push (the agent only reports it on the upload chunk loop) —
+  // pulling and the post-game settle wait get an indeterminate bar rather than a fabricated percent.
+  const pct = current.phase === 'Pushing' && current.bytesTotal > 0
+    ? Math.min(100, Math.round((current.bytesDone / current.bytesTotal) * 100))
+    : null
+
+  return (
+    <PanelSection title="Syncing">
+      <PanelSectionRow>
+        <ReadOnlyRow>
+          <div style={{ fontSize: '0.85em', marginBottom: '4px' }}>
+            {(current.gameName ?? 'a game') + ' — ' + current.phase.toLowerCase()}
+            {pct !== null && ` (${pct}%)`}
+          </div>
+          <div style={{ background: 'rgba(255,255,255,0.15)', borderRadius: '3px', height: '5px', overflow: 'hidden' }}>
+            <div style={{
+              background: 'rgba(255,255,255,0.6)',
+              height: '100%',
+              width: pct !== null ? `${pct}%` : '35%',
+              opacity: pct !== null ? 1 : 0.7,
+            }} />
+          </div>
+        </ReadOnlyRow>
+      </PanelSectionRow>
+    </PanelSection>
+  )
+}
+
+function timeAgo(iso: string): string {
+  const seconds = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000))
+  if (seconds < 60) return 'just now'
+  const minutes = Math.floor(seconds / 60)
+  if (minutes < 60) return `${minutes}m ago`
+  const hours = Math.floor(minutes / 60)
+  if (hours < 24) return `${hours}h ago`
+  return `${Math.floor(hours / 24)}d ago`
+}
+
+/**
+ * The agent-wide history `SyncActivityTracker` keeps — every push, pull and refusal from every
+ * source on this machine (this panel's own buttons, Gaming Mode detection, the tray's "Sync All"),
+ * not scoped to this plugin's own actions. Placed last in the panel, after Diagnostics: it's detail
+ * and history, same tier as doctor's raw output, not something that should push Sync or Gaming Mode
+ * sync further down the D-pad scroll the way the live-right-now Progress bar under Status deserves to.
+ */
+function ActivityLog({ entries }: { entries: ActivityLogEntry[] }) {
+  return (
+    <PanelSection title="Activity">
+      {entries.length === 0 && (
+        <PanelSectionRow><ReadOnlyRow>Nothing yet.</ReadOnlyRow></PanelSectionRow>
+      )}
+      {entries.map((e, i) => (
+        <PanelSectionRow key={i}>
+          <ReadOnlyRow>
+            <div style={{ fontSize: '0.8em' }}>
+              <div style={{ opacity: 0.7 }}>{timeAgo(e.timestampUtc)}</div>
+              {/* The agent's own words, verbatim — same "don't paraphrase a refusal" principle the
+                  Sync panel's own output already follows. */}
+              <div style={{ wordBreak: 'break-word' }}>{e.message}</div>
+            </div>
+          </ReadOnlyRow>
+        </PanelSectionRow>
+      ))}
+    </PanelSection>
+  )
+}
+
 function Content() {
   const [outcomes, setOutcomes] = useState<Outcome[]>([])
   const [problem, setProblem] = useState<string | undefined>()
@@ -664,14 +813,22 @@ function Content() {
   const [state, setState] = useState<AgentState | null>(null)
   const [version, setVersion] = useState<AgentVersion | null>(null)
   const [games, setGames] = useState<TrackedGame[]>([])
+  const [rows, setRows] = useState<Row[]>([])
+  const [activity, setActivity] = useState<ActivityDto | null>(null)
+  // Off by default: this is detail on the level of Diagnostics' raw output, not something worth
+  // taking space from Sync/Activity/Gaming Mode sync every time the panel opens.
+  const [launchOptionsExpanded, setLaunchOptionsExpanded] = useState(false)
   // Which warnings have already been toasted, so a standing warning is announced once rather than
   // every refresh. A panel that toasts the same thing every minute gets uninstalled.
   const [toasted, setToasted] = useState<Set<string>>(new Set())
 
   const refreshStatus = async () => {
-    const [s, v, g] = await Promise.all([fetchState(), fetchVersion(), fetchGames()])
+    const [s, v, g, r] = await Promise.all([fetchState(), fetchVersion(), fetchGames(), fetchRows()])
     if (v.ok) setVersion(v.data)
     if (g.ok) setGames(g.data)
+    // GameSyncSettings' Steam-App-ID default needs this too, not just the Launch options section
+    // below — fetched here rather than duplicated, since Content() already polls it every 30s.
+    if (r.ok) setRows(r.data)
     if (!s.ok) { setState(null); return }
     setState(s.data)
 
@@ -685,6 +842,11 @@ function Content() {
       }
       setToasted((prev) => new Set([...prev, ...fresh.map((w) => w.gameName)]))
     }
+  }
+
+  const refreshActivity = async () => {
+    const a = await fetchActivity()
+    if (a.ok) setActivity(a.data)
   }
 
   const dismiss = async (gameName: string) => {
@@ -717,21 +879,43 @@ function Content() {
     // The automatic pass NEVER writes. Only the button does, and only with the toggle on.
     void run(false)
     void refreshStatus()
+    void refreshActivity()
     // Enrollment is rare, so this is a slow safety net rather than a poll. Idempotence on the agent
     // side is what makes re-running it free.
     const timer = setInterval(() => void run(false), 5 * 60 * 1000)
     // Status is cheap and time-sensitive in a way launch options are not: a lease taken on another
     // machine while this panel is open is exactly what the warning is for.
     const statusTimer = setInterval(() => void refreshStatus(), 30 * 1000)
-    return () => { clearInterval(timer); clearInterval(statusTimer) }
+    // Activity is an in-memory read on the agent's side, meant to be polled far more often than
+    // state — this is what makes the progress bar below look live rather than stepped.
+    const activityTimer = setInterval(() => void refreshActivity(), 2 * 1000)
+    return () => { clearInterval(timer); clearInterval(statusTimer); clearInterval(activityTimer) }
   }, [])
 
   return (
     <>
     <LeaseWarnings warnings={state?.leaseWarnings ?? []} onDismiss={(g) => void dismiss(g)} />
     <Status state={state} version={version} />
+    <Progress activity={activity} />
     <StagedUpdate version={version} onSettled={() => void refreshStatus()} />
+    <Sync games={games} />
+    <ActivityLog entries={activity?.recent ?? []} />
+    <GamingSyncSettings />
+    <GameSyncSettings rows={rows} games={games} />
+    <Diagnostics />
     <PanelSection title="Launch options">
+      {/* Collapsed by default — the toggle, the check/apply button and a per-game log are detail on
+          the level of Diagnostics' raw output, not something worth taking space from Sync/Activity/
+          Gaming Mode sync every time the panel opens. The 5-minute automatic dry-run check above
+          keeps running regardless of whether this is expanded — collapsing is a display choice, not
+          a pause. */}
+      <PanelSectionRow>
+        <ButtonItem layout="below" onClick={() => setLaunchOptionsExpanded((v) => !v)}>
+          {launchOptionsExpanded ? 'Hide launch options' : 'Show launch options'}
+        </ButtonItem>
+      </PanelSectionRow>
+      {launchOptionsExpanded && (
+      <>
       <PanelSectionRow>
         <ToggleField
           label="Allow writing to Steam"
@@ -803,17 +987,22 @@ function Content() {
           ))}
         </Focusable>
       </PanelSectionRow>
+      </>
+      )}
     </PanelSection>
-    <Sync games={games} />
-    <Diagnostics />
     </>
   )
 }
 
-export default definePlugin(() => ({
-  name: 'SaveLocker',
-  titleView: <div className={staticClasses.Title}>SaveLocker</div>,
-  content: <Content />,
-  icon: <FaGamepad />,
-  onDismount() { /* the interval is owned by Content's effect */ },
-}))
+export default definePlugin(() => {
+  // Wired once, at plugin load, rather than from Content()'s mount — see registerGamingModeSync's
+  // own doc comment in gamingSync.tsx for why that timing matters.
+  registerGamingModeSync()
+  return {
+    name: 'SaveLocker',
+    titleView: <div className={staticClasses.Title}>SaveLocker</div>,
+    content: <Content />,
+    icon: <FaGamepad />,
+    onDismount() { /* the interval is owned by Content's effect */ },
+  }
+})
