@@ -31,6 +31,8 @@ interface GamingSyncGame {
   gameId: string
   name: string
   alias: string | null
+  hasSteamCloud: boolean
+  pullBeforeLaunchEnabled: boolean | null
 }
 
 type Result<T> = { ok: true; data: T } | { ok: false; reason: string }
@@ -41,7 +43,6 @@ const runSyncForGaming =
   callable<[string, string | null, boolean], Result<{ exitCode: number; output: string }>>('sync')
 const fetchGamingSyncEnabled = callable<[], boolean>('gaming_sync_enabled')
 const persistGamingSyncEnabled = callable<[boolean], void>('set_gaming_sync_enabled')
-const fetchPullOverrides = callable<[], Record<string, boolean>>('gaming_pull_overrides')
 
 // Module scope, not React state: this needs to be read from a SteamClient callback that fires
 // outside any component's lifetime, same reasoning as index.tsx's `stickyTarget`.
@@ -53,45 +54,45 @@ let gamingSyncEnabled = true
 const trackedLaunches = new Map<number, string>()
 
 /**
- * Which tracked game (if any) this Steam AppID is, whether this mechanism should touch it at all,
- * and whether it has a resolved Steam AppID (used to default the pull-enabled setting below). Null
- * covers both "not an enrolled game" and "enrolled, but the launch-option wrapper already owns it" —
- * the caller doesn't need to tell those apart, it just does nothing either way.
+ * Which tracked game (if any) this Steam AppID is, and whether this mechanism should touch it at
+ * all. Null covers both "not an enrolled game" and "enrolled, but the launch-option wrapper already
+ * owns it" — the caller doesn't need to tell those apart, it just does nothing either way. Returns
+ * the game's own record (carrying its resolved SteamAppId and pull-before-launch override) rather
+ * than a derived summary, so the caller doesn't have to re-fetch it a second time.
  */
-async function resolveMatch(
-  appId: number,
-): Promise<{ gameId: string; name: string; isSteamGame: boolean } | null> {
+async function resolveMatch(appId: number): Promise<GamingSyncGame | null> {
   const [rows, games] = await Promise.all([fetchRowsForSync(), fetchGamesForSync()])
+  if (!games.ok) return null
 
   // Primary match: the exact steamAppId -> game mapping already fetched for the launch-options
   // feature. Far more reliable than a name comparison, and it doubles as the wrapper-applied check.
   if (rows.ok) {
     const row = rows.data.find((r) => r.steamAppId === appId)
-    if (row) return row.appliedAt !== null ? null : { gameId: row.gameId, name: row.name, isSteamGame: true }
+    if (row) {
+      if (row.appliedAt !== null) return null // the wrapper already owns this launch
+      return games.data.find((g) => g.gameId === row.gameId) ?? null
+    }
   }
 
-  // Fallback: only reachable for a game absent from `rows()` at all — i.e. one with no resolvable
-  // Steam AppID, so there is no wrapper to race regardless of what this finds, and not "a Steam
-  // game" for the pull-enabled default below (Steam Cloud has nothing to key on here either).
-  if (!games.ok) return null
+  // Fallback: only reachable for a game absent from `rows()` at all — either it has no resolvable
+  // Steam AppID, or the launch-options wrapper binary isn't installed on this machine at all (rows()
+  // comes back empty either way) — so there is no wrapper to race regardless of what this finds.
   const displayName = appStore.GetAppOverviewByAppID(appId)?.display_name?.trim().toLowerCase()
   if (!displayName) return null
-  const game = games.data.find((g) => (g.alias ?? g.name).trim().toLowerCase() === displayName)
-  return game ? { gameId: game.gameId, name: game.name, isSteamGame: false } : null
+  return games.data.find((g) => (g.alias ?? g.name).trim().toLowerCase() === displayName) ?? null
 }
 
 /**
  * Whether the pre-launch pull should run for this game: an explicit override if the user set one,
- * else off for a game with a resolved Steam AppID (so this never fights Steam's own Cloud sync for
- * an ordinary Steam library game) and on otherwise.
+ * else off for a title known to have Steam Cloud saves (so this never fights Steam's own Cloud sync)
+ * and on otherwise. `hasSteamCloud`, not a resolved Steam AppID — a non-Steam shortcut run under
+ * Proton gets its own compatdata prefix too, so an AppID alone can't tell the two apart.
  */
-export function resolvePullEnabled(
-  overrides: Record<string, boolean>,
-  gameId: string,
-  isSteamGame: boolean,
-): boolean {
-  const override = overrides[gameId]
-  return override !== undefined ? override : !isSteamGame
+export function resolvePullEnabled(game: {
+  pullBeforeLaunchEnabled: boolean | null
+  hasSteamCloud: boolean
+}): boolean {
+  return game.pullBeforeLaunchEnabled ?? !game.hasSteamCloud
 }
 
 async function handleLifetimeChange(data: SaveLockerAppLifetimeNotification): Promise<void> {
@@ -104,9 +105,7 @@ async function handleLifetimeChange(data: SaveLockerAppLifetimeNotification): Pr
 
     trackedLaunches.set(data.unAppID, match.name)
 
-    const overrides = await fetchPullOverrides()
-    const pullEnabled = resolvePullEnabled(overrides, match.gameId, match.isSteamGame)
-    if (!pullEnabled) {
+    if (!resolvePullEnabled(match)) {
       toaster.toast({ title: 'SaveLocker', body: `Pull before launch is disabled for ${match.name}` })
       return
     }
@@ -168,6 +167,3 @@ export function GamingSyncSettings() {
     </PanelSection>
   )
 }
-
-// GamingSyncRow/GamingSyncGame stay exported-in-spirit via fullPage.tsx's own equivalent local
-// types (same shape) — this file only needs them for resolveMatch above, not any UI anymore.

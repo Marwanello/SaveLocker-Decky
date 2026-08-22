@@ -152,6 +152,20 @@ def _write_settings(settings: dict) -> None:
 
 
 class Plugin:
+    async def plugin_version(self):
+        """
+        This plugin's own version — not the agent's (see `agent_version`). Read straight from
+        package.json next to this file rather than hardcoded, so it is never stale and so testenv.ps1's
+        isolated test build (which rewrites that file's "version" to a "-test"-suffixed one before
+        staging) reports its own version here too, distinct from a real install's.
+        """
+        try:
+            path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "package.json")
+            with open(path, "r", encoding="utf-8") as handle:
+                return json.load(handle).get("version", "unknown")
+        except (OSError, json.JSONDecodeError):
+            return "unknown"
+
     async def state(self):
         """Connection, machine, last sync, and any lease warnings this device is holding."""
         return _request("/api/state")
@@ -276,26 +290,15 @@ class Plugin:
         settings["gamingSyncEnabled"] = enabled
         _write_settings(settings)
 
-    async def gaming_pull_overrides(self):
+    async def set_pull_before_launch(self, game_id: str, enabled: bool | None):
         """
-        Per-game overrides for whether Gaming Mode's pre-launch pull runs at all — post-exit push is
-        never gated by this, only the pull. Keyed by gameId; a game absent here has no override, and
-        the frontend falls back to its own computed default (off for a game with a resolved Steam
-        AppID, so this never fights Steam's own Cloud sync for an ordinary Steam library game; on
-        otherwise). Local to this plugin, not the agent — nothing outside this plugin's own Gaming
-        Mode detection reads it.
+        Set (or clear, with `enabled=None`) this game's Gaming Mode pre-launch-pull override —
+        post-exit push is never gated by this, only the pull. Agent-side, not a local settings file:
+        every machine syncing this game agrees on it, same reasoning as `set_alias`. `games()` already
+        reports the current value back as `pullBeforeLaunchEnabled`, so there is no matching getter
+        here.
         """
-        return _read_settings().get("pullEnabledOverrides", {})
-
-    async def set_gaming_pull_enabled(self, game_id: str, enabled: bool | None):
-        """`enabled=None` clears the override, reverting that game to the computed default."""
-        settings = _read_settings()
-        overrides = settings.setdefault("pullEnabledOverrides", {})
-        if enabled is None:
-            overrides.pop(game_id, None)
-        else:
-            overrides[game_id] = enabled
-        _write_settings(settings)
+        return _request("/api/games/%s/pull-before-launch" % game_id, {"enabled": enabled})
 
     async def sync(self, action: str, game: str | None = None, force: bool = False):
         """

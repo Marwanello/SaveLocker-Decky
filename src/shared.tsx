@@ -87,6 +87,16 @@ export interface TrackedGame {
   saveDirectory: string
   /** Manual name-match override for Gaming Mode sync's fallback matcher — see `gamingSync.tsx`. */
   alias: string | null
+  /** This game's resolved compatdata-prefix AppID, or null when it has none. NOT an "is this a
+   * Steam Store game" signal — a non-Steam shortcut run under Proton gets its own compatdata prefix
+   * too. Use `hasSteamCloud` for that question. */
+  steamAppId: number | null
+  /** Whether this title is known to have Steam Cloud saves (a Ludusavi-manifest lookup, resolved
+   * server-side) — the signal `resolvePullEnabled` actually needs, independent of `steamAppId`. */
+  hasSteamCloud: boolean
+  /** Gaming Mode pre-launch-pull override: null means "use the computed default" — see
+   * `gamingSync.tsx`'s `resolvePullEnabled`. */
+  pullBeforeLaunchEnabled: boolean | null
 }
 
 /** What the agent's `SyncActivityTracker` reports right now, and its short rolling history — the
@@ -121,6 +131,8 @@ export const fetchState = callable<[], AgentResult<AgentState>>('state')
 export const fetchVersion = callable<[], AgentResult<AgentVersion>>('agent_version')
 export const fetchActivity = callable<[], AgentResult<ActivityDto>>('activity')
 export const runDoctor = callable<[], AgentResult<DoctorResult>>('doctor')
+/** This plugin's own version (not the agent's) — see `main.py`'s `plugin_version`. */
+export const fetchPluginVersion = callable<[], string>('plugin_version')
 
 /**
  * A game's launch options as Steam holds them right now.

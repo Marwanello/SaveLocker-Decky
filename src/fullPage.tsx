@@ -5,9 +5,9 @@ import {
 import { callable } from '@decky/api'
 import {
   ReadOnlyRow, applyAll, shortState, summarise, timeAgo,
-  fetchGames, fetchRows, fetchState, fetchVersion, fetchActivity, runDoctor, runSync,
+  fetchGames, fetchState, fetchVersion, fetchActivity, fetchPluginVersion, runDoctor, runSync,
   type ActivityDto, type ActivityLogEntry, type AgentResult, type AgentState, type AgentVersion,
-  type DoctorResult, type Outcome, type Row, type TrackedGame,
+  type DoctorResult, type Outcome, type TrackedGame,
 } from './shared'
 import { resolvePullEnabled } from './gamingSync'
 
@@ -21,25 +21,21 @@ import { resolvePullEnabled } from './gamingSync'
 export const SAVELOCKER_PAGE_ROUTE = '/savelocker'
 
 const setAlias = callable<[string, string | null], AgentResult<null>>('set_alias')
-const persistPullEnabled = callable<[string, boolean | null], void>('set_gaming_pull_enabled')
-const fetchPullOverrides = callable<[], Record<string, boolean>>('gaming_pull_overrides')
+const persistPullBeforeLaunch = callable<[string, boolean | null], AgentResult<null>>('set_pull_before_launch')
 
 /**
  * One game's row in the Overview tab's list: name, the effective alias (defaulting to the game's
  * own name, same as the old QAM picker did), and the pull-before-launch toggle — all inline, no
  * dropdown, so there's nothing here that depends on the QAM's own dropdown-remounts-the-panel quirk.
  */
-function GameRow({ game, isSteamGame, pullEnabled, onChanged }: {
-  game: TrackedGame
-  isSteamGame: boolean
-  pullEnabled: boolean
-  onChanged: () => void
-}) {
+function GameRow({ game, onChanged }: { game: TrackedGame; onChanged: () => void }) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState('')
   const [busy, setBusy] = useState(false)
+  const [pullBusy, setPullBusy] = useState(false)
 
   const effective = game.alias ?? game.name
+  const pullEnabled = resolvePullEnabled(game)
 
   const startEdit = () => {
     setDraft(effective)
@@ -62,9 +58,21 @@ function GameRow({ game, isSteamGame, pullEnabled, onChanged }: {
     }
   }
 
-  const togglePull = (value: boolean) => {
-    void persistPullEnabled(game.gameId, value)
-    onChanged()
+  const togglePull = async (value: boolean) => {
+    setPullBusy(true)
+    try {
+      // Awaited, then applied optimistically only on success — not fire-and-forget: onChanged()
+      // below re-fetches games() almost immediately, and firing the write without waiting for it
+      // to land let that re-fetch win the race and read back the value from before this toggle,
+      // which is what made this toggle look like it did nothing.
+      const r = await persistPullBeforeLaunch(game.gameId, value)
+      if (r.ok) {
+        game.pullBeforeLaunchEnabled = value
+        onChanged()
+      }
+    } finally {
+      setPullBusy(false)
+    }
   }
 
   return (
@@ -79,17 +87,26 @@ function GameRow({ game, isSteamGame, pullEnabled, onChanged }: {
           <div style={{ fontSize: '15px' }}>{game.name}</div>
           {!editing && (
             <div style={{ fontSize: '12px', opacity: 0.65 }}>
-              alias: {effective} · {isSteamGame ? 'Steam App ID resolved' : 'no Steam App ID'}
+              alias: {effective} · {game.hasSteamCloud ? 'Steam Cloud' : 'no Steam Cloud'}
             </div>
           )}
         </div>
         {!editing && (
-          <>
-            <ToggleField label="Pull before launch" checked={pullEnabled} onChange={togglePull} />
+          // flow-children="right": the pull toggle and the edit-alias button are two controls
+          // side by side in the same row — without this they inherit the list's vertical "down"
+          // flow, so left/right would fall through this row's boundary before ever switching
+          // between them, instead of picking one and reserving down for the next game.
+          <Focusable flow-children="right" style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+            <ToggleField
+              label="Pull before launch"
+              checked={pullEnabled}
+              disabled={pullBusy}
+              onChange={(value: boolean) => void togglePull(value)}
+            />
             <DialogButton onClick={startEdit} style={{ width: 'auto', minWidth: 0, padding: '8px 14px' }}>
               Edit alias
             </DialogButton>
-          </>
+          </Focusable>
         )}
       </div>
       {editing && (
@@ -112,27 +129,27 @@ function GameRow({ game, isSteamGame, pullEnabled, onChanged }: {
 function OverviewTab() {
   const [state, setState] = useState<AgentState | null>(null)
   const [version, setVersion] = useState<AgentVersion | null>(null)
+  const [pluginVersion, setPluginVersion] = useState<string | null>(null)
   const [games, setGames] = useState<TrackedGame[]>([])
-  const [rows, setRows] = useState<Row[]>([])
   const [activity, setActivity] = useState<ActivityDto | null>(null)
-  const [overrides, setOverrides] = useState<Record<string, boolean>>({})
   const [search, setSearch] = useState('')
   const [syncing, setSyncing] = useState(false)
 
   const refresh = async () => {
-    const [s, v, g, r, a, o] = await Promise.all([
-      fetchState(), fetchVersion(), fetchGames(), fetchRows(), fetchActivity(), fetchPullOverrides(),
+    const [s, v, g, a] = await Promise.all([
+      fetchState(), fetchVersion(), fetchGames(), fetchActivity(),
     ])
     if (s.ok) setState(s.data)
     if (v.ok) setVersion(v.data)
     if (g.ok) setGames(g.data)
-    if (r.ok) setRows(r.data)
     if (a.ok) setActivity(a.data)
-    setOverrides(o)
   }
 
   useEffect(() => {
     void refresh()
+    // The plugin's own version never changes at runtime, unlike everything else here — fetched once
+    // rather than on every poll tick.
+    void fetchPluginVersion().then(setPluginVersion)
     // Same cadence as the QAM's own Status/Activity polling (index.tsx's Content()) — this page
     // polls independently rather than sharing that timer, since it can be open at the same time as
     // (or instead of) the QAM.
@@ -140,7 +157,6 @@ function OverviewTab() {
     return () => clearInterval(t)
   }, [])
 
-  const steamGameIds = new Set(rows.map((r) => r.gameId))
   const query = search.trim().toLowerCase()
   const filtered = query === '' ? games : games.filter((g) => {
     const effective = (g.alias ?? g.name).toLowerCase()
@@ -166,12 +182,13 @@ function OverviewTab() {
         </DialogButton>
       </div>
 
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '10px', marginBottom: '20px' }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '10px', marginBottom: '20px' }}>
         {[
           ['Server', state ? (state.connected ? state.machineName : 'not connected') : '—'],
           ['Games', state ? String(state.gamesTracked) : '—'],
           ['Last sync', state ? state.lastSyncAgo : '—'],
           ['Agent', state ? state.currentVersion : '—'],
+          ['Plugin', pluginVersion ?? '—'],
         ].map(([label, value]) => (
           <div key={label} style={{ background: 'rgba(255,255,255,0.04)', borderRadius: '8px', padding: '10px' }}>
             <div style={{ fontSize: '11px', opacity: 0.6 }}>{label}</div>
@@ -194,22 +211,21 @@ function OverviewTab() {
       <div style={{ marginBottom: '10px' }}>
         <TextField label="Search games" value={search} onChange={(e: any) => setSearch(e?.target?.value ?? '')} />
       </div>
-      <div style={{ maxHeight: '320px', overflowY: 'auto', marginBottom: '24px' }}>
+      {/* flow-children="down": without it, D-pad down from a row's toggle can land on that same
+          row's "Edit alias" button instead of the next game — Panorama's default flow considers
+          both of a row's controls before moving past the row, since a plain wrapped flex layout
+          gives it no other ordering to go on. Forcing a vertical flow at the list level makes down
+          always step row-to-row regardless of which control inside a row currently has focus. */}
+      <Focusable flow-children="down" style={{ maxHeight: '320px', overflowY: 'auto', marginBottom: '24px' }}>
         {filtered.length === 0 && (
           <div style={{ opacity: 0.6, fontSize: '13px', padding: '8px 2px' }}>
             {games.length === 0 ? 'No tracked games yet.' : `No games match "${search.trim()}".`}
           </div>
         )}
         {filtered.map((g) => (
-          <GameRow
-            key={g.gameId}
-            game={g}
-            isSteamGame={steamGameIds.has(g.gameId)}
-            pullEnabled={resolvePullEnabled(overrides, g.gameId, steamGameIds.has(g.gameId))}
-            onChanged={() => void refresh()}
-          />
+          <GameRow key={g.gameId} game={g} onChanged={() => void refresh()} />
         ))}
-      </div>
+      </Focusable>
 
       <div style={{ fontSize: '13px', opacity: 0.6, letterSpacing: '0.04em', marginBottom: '8px' }}>ACTIVITY</div>
       <ActivityLog entries={activity?.recent ?? []} />
@@ -270,8 +286,12 @@ function Diagnostics() {
 
   return (
     <div>
-      <div style={{ marginBottom: '14px' }}>
-        <DialogButton disabled={busy} onClick={() => void run()} style={{ width: 'auto', minWidth: 0 }}>
+      <div style={{ marginTop: '10px', marginBottom: '20px' }}>
+        <DialogButton
+          disabled={busy}
+          onClick={() => void run()}
+          style={{ width: '100%', padding: '16px', fontSize: '16px' }}
+        >
           {busy ? 'Running doctor…' : 'Run doctor'}
         </DialogButton>
       </div>
@@ -386,6 +406,35 @@ function LaunchOptions() {
   )
 }
 
+/**
+ * Steam's Tabs component (`TabRowTabs`) animates its header row's horizontal scroll position
+ * whenever the active tab changes, so the row can bring an off-screen header into view — with the
+ * default transition, switching to a tab whose header sits further right (the third one, here)
+ * visibly glitches as the row animates under the newly-mounted content. Killing that transition/
+ * animation (borrowed from a fix used by more than one other Decky plugin shipping a Tabs-based
+ * full page — Freedeck and its forks) leaves the row jumping straight to position instead, and
+ * forces its scroll panels to lay out immediately rather than mid-animation.
+ *
+ * The `[class*="…"]` selectors match on a substring of Steam's build-hashed CSS module class names
+ * (e.g. `TabRowTabs_a1b2c3`), which is stable across Steam client updates in a way a full class name
+ * isn't — the same technique `@decky/ui` itself uses internally to locate these components.
+ */
+const tabStabilityCss = `
+  .savelocker-fullpage [class*="TabContentsScroll"],
+  .savelocker-fullpage [class*="TabContents"],
+  .savelocker-fullpage [class*="ScrollPanel"] {
+    overflow-y: auto !important;
+  }
+  .savelocker-fullpage [class*="TabHeaderRowWrapper"],
+  .savelocker-fullpage [class*="TabRowTabs"],
+  .savelocker-fullpage [class*="TabsRowScroll"],
+  .savelocker-fullpage [class*="TabRow"] {
+    transition: none !important;
+    animation: none !important;
+    scroll-behavior: auto !important;
+  }
+`
+
 export function FullPage() {
   const [activeTab, setActiveTab] = useState('overview')
 
@@ -396,11 +445,13 @@ export function FullPage() {
   ]
 
   return (
-    // marginTop clears Steam's own window chrome above a routed full page — matched to what other
-    // Decky plugins with a settings route use; needs hardware verification, not something checkable
-    // outside Steam's own JS context.
-    <div style={{ marginTop: '40px', height: 'calc(100% - 40px)' }}>
-      <Tabs activeTab={activeTab} onShowTab={setActiveTab} tabs={tabs} />
+    <div className="savelocker-fullpage" style={{ paddingTop: '48px', minHeight: '100%', boxSizing: 'border-box' }}>
+      <style>{tabStabilityCss}</style>
+      {/* autoFocusContents: without it nothing on the page is focused on mount, so the gamepad has no
+          entry point into it at all and L1/R1 (which Steam routes to whatever holds focus) never
+          reaches the Tabs component — matches the same prop used by SteamGridDB's own Tabs-based
+          full page, one of the most-used Decky plugins, for the identical layout shape. */}
+      <Tabs autoFocusContents activeTab={activeTab} onShowTab={setActiveTab} tabs={tabs} />
     </div>
   )
 }

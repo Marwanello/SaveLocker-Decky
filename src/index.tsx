@@ -550,15 +550,34 @@ function Content() {
     // whether this fire-and-forget call is ever looked at.
     void applyAll(false)
     void refreshStatus()
-    void refreshActivity()
     const timer = setInterval(() => void applyAll(false), 5 * 60 * 1000)
     // Status is cheap and time-sensitive in a way launch options are not: a lease taken on another
     // machine while this panel is open is exactly what the warning is for.
     const statusTimer = setInterval(() => void refreshStatus(), 30 * 1000)
-    // Activity is an in-memory read on the agent's side, meant to be polled far more often than
-    // state — this is what makes the progress bar below look live rather than stepped.
-    const activityTimer = setInterval(() => void refreshActivity(), 2 * 1000)
-    return () => { clearInterval(timer); clearInterval(statusTimer); clearInterval(activityTimer) }
+
+    // Adaptive, not a flat setInterval: Decky keeps a QAM plugin's content mounted for as long as
+    // the plugin is loaded, not just while the panel is open, so this effect runs continuously for
+    // the whole time Steam is up — including through an entire play session. 2s only matters while
+    // something is actually mid-sync, to keep the progress bar live; the rest of the time (the large
+    // majority of it) this only needs to notice a Gaming-Mode-triggered sync starting, so it backs
+    // off to a much slower poll instead of spending a request every 2s indefinitely for nothing.
+    let activityTimeout: ReturnType<typeof setTimeout>
+    let cancelled = false
+    const scheduleActivity = async () => {
+      const a = await fetchActivity()
+      if (cancelled) return
+      if (a.ok) setActivity(a.data)
+      const idle = !a.ok || a.data.current.phase === 'Idle'
+      activityTimeout = setTimeout(() => void scheduleActivity(), idle ? 10 * 1000 : 2 * 1000)
+    }
+    void scheduleActivity()
+
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+      clearInterval(statusTimer)
+      clearTimeout(activityTimeout)
+    }
   }, [])
 
   return (
