@@ -1,28 +1,24 @@
 import { useEffect, useState } from 'react'
 import {
-  ButtonItem, ConfirmModal, DropdownItem, Field, Focusable, PanelSection, PanelSectionRow,
-  ToggleField, showModal, staticClasses,
+  ButtonItem, ConfirmModal, DropdownItem, Focusable, Navigation, PanelSection, PanelSectionRow,
+  showModal, staticClasses,
 } from '@decky/ui'
-
-/**
- * A read-only row the D-pad can actually land on.
- *
- * `Field`'s own `focusable` prop, not a bare `Focusable`: the QAM scrolls by MOVING FOCUS, and a
- * `Focusable` with no handler is not reliably a navigation target — so a block of them is a hole the
- * D-pad skips, and scrolling up into it jumps to the back button instead. Every read-only row in
- * this panel goes through here for that reason.
- */
-const ReadOnlyRow = ({ children }: { children: React.ReactNode; key?: string | number }) => (
-  <Field focusable={true} bottomSeparator="none" childrenLayout="below"
-         childrenContainerWidth="max">
-    {children}
-  </Field>
-)
-import { callable, definePlugin, toaster } from '@decky/api'
+import { callable, definePlugin, routerHook, toaster } from '@decky/api'
 import { FaGamepad } from 'react-icons/fa'
+import { GamingSyncSettings, registerGamingModeSync } from './gamingSync'
+import { classifySyncOutput } from './syncStatus'
+import { registerLibraryOverlay, unregisterLibraryOverlay } from './libraryOverlay'
+import { FullPage, SAVELOCKER_PAGE_ROUTE } from './fullPage'
+import {
+  ReadOnlyRow, applyAll, fetchActivity, fetchGames, fetchState, fetchVersion, runSync,
+  type ActivityDto, type AgentResult, type AgentState, type AgentVersion, type TrackedGame,
+} from './shared'
 
 /**
- * SaveLocker's Decky plugin.
+ * SaveLocker's Decky plugin — the Quick Access panel half. The full-screen settings page lives in
+ * fullPage.tsx; types/callables/helpers both files need live in shared.tsx, not here — Decky's build
+ * (`@decky/rollup`) requires this ENTRY file to have exactly one export, the plugin definition
+ * itself (`output.exports: 'default'`), so nothing else may import a named export from this file.
  *
  * It sets the Steam launch options SaveLocker needs, which the agent cannot do itself: Steam holds
  * localconfig.vdf / shortcuts.vdf in memory and rewrites them on exit, so an agent-side edit is
@@ -32,205 +28,11 @@ import { FaGamepad } from 'react-icons/fa'
  * It deliberately knows NOTHING about what a launch option should look like. It reads current
  * values out of Steam, asks the agent to merge them, and writes back what it is told. The rule
  * lives in the agent (`LaunchOptions.cs`), where it is tested without Steam or hardware, so the
- * command can change without a plugin release.
+ * command can change without a plugin release. See shared.tsx's `applyAll` for that whole pass.
  */
 
-interface Row {
-  steamAppId: number
-  gameId: string
-  name: string
-  desired: string
-  appliedAt: string | null
-  error: string | null
-}
-
-interface Resolved {
-  steamAppId: number
-  desired: string
-  changed: boolean
-}
-
-interface LeaseWarning {
-  gameName: string
-  holderMachine: string
-}
-
-interface AgentState {
-  connected: boolean
-  currentVersion: string
-  machineName: string
-  serverUrl: string
-  gamesTracked: number
-  savesBacked: number
-  lastSyncAgo: string
-  leaseWarnings: LeaseWarning[]
-}
-
-/**
- * `updateAvailable` and `stagedVersion` are different states and only one of them is actionable
- * from here.
- *
- * Available means the server is offering something newer and nothing has been downloaded: taking it
- * needs network, a download, a digest check and a smoke test, any of which can fail and all of which
- * take a while. Staged means the payload is already on this disk, verified against the published
- * SHA-256 and smoke-tested — applying it is a file copy and a restart, which works offline and
- * cannot fail for any of the reasons a download can.
- *
- * The "Install update now" button is offered for `stagedVersion` and never for `updateAvailable`,
- * because on the second it would be promising something it cannot deliver quickly or offline.
- */
-interface AgentVersion {
-  currentVersion: string
-  latestVersion: string | null
-  updateAvailable: boolean
-  stagedVersion: string | null
-  /** Why restarting right now would install nothing. The agent's own sentence — show it verbatim. */
-  stagedBlockedReason: string | null
-}
-
-interface DoctorResult {
-  exitCode: number
-  output: string
-}
-
-interface TrackedGame {
-  gameId: string
-  name: string
-  saveDirectory: string
-}
-
-type AgentResult<T> = { ok: true; data: T } | { ok: false; reason: string }
-
-const fetchRows = callable<[], AgentResult<Row[]>>('rows')
-const resolveOptions =
-  callable<[{ steamAppId: number; current: string }[]], AgentResult<Resolved[]>>('resolve')
-const report = callable<[number, boolean, string | null], AgentResult<null>>('report')
-const fetchGames = callable<[], AgentResult<TrackedGame[]>>('games')
-const runSync = callable<[string, string | null, boolean], AgentResult<DoctorResult>>('sync')
-const fetchState = callable<[], AgentResult<AgentState>>('state')
-const fetchVersion = callable<[], AgentResult<AgentVersion>>('agent_version')
 const dismissWarning = callable<[string], AgentResult<null>>('dismiss_warning')
-const runDoctor = callable<[], AgentResult<DoctorResult>>('doctor')
 const restartAgent = callable<[], AgentResult<null>>('restart_agent')
-
-/**
- * A game's launch options as Steam holds them right now.
- *
- * `RegisterForAppDetails` is a subscription, not a getter, so this takes the first callback and
- * unregisters. The timeout matters: an AppID Steam does not know never calls back at all, and
- * without it the whole sweep would hang on one stale shortcut.
- *
- * A non-Steam shortcut keeps its options in `strShortcutLaunchOptions` while an installed Steam
- * game uses `strLaunchOptions`, and the first is the case SaveLocker exists for — so take whichever
- * is set rather than guessing which kind of app this is.
- */
-function currentLaunchOptions(appId: number): Promise<string> {
-  return new Promise((resolve) => {
-    let settled = false
-    const finish = (value: string) => {
-      if (settled) return
-      settled = true
-      try { registration?.unregister() } catch { /* already gone */ }
-      resolve(value)
-    }
-
-    const registration = SteamClient.Apps.RegisterForAppDetails(appId, (details: any) => {
-      finish(details?.strShortcutLaunchOptions || details?.strLaunchOptions || '')
-    })
-
-    setTimeout(() => finish(''), 4000)
-  })
-}
-
-interface Outcome {
-  name: string
-  state: 'written' | 'already-correct' | 'failed' | 'would-write'
-  /** Exactly what was read out of Steam. Shown verbatim — it is the evidence, not a summary. */
-  current: string
-  target: string
-  detail?: string
-}
-
-/**
- * One pass: read what Steam has, ask the agent what it should be, write only what differs.
- *
- * Writing only on `changed` is the whole safety story. `Row.desired` assumes a game with nothing
- * set; a user running mangohud, setting environment variables or passing per-game arguments has
- * something set, and the resolve round trip is what preserves it.
- */
-async function applyAll(write: boolean): Promise<{ outcomes: Outcome[]; problem?: string }> {
-  const rows = await fetchRows()
-  if (!rows.ok) return { outcomes: [], problem: rows.reason }
-  if (rows.data.length === 0) return { outcomes: [] }
-
-  const current = await Promise.all(
-    rows.data.map(async (row) => ({
-      steamAppId: row.steamAppId,
-      current: await currentLaunchOptions(row.steamAppId),
-    })),
-  )
-  const currentByAppId = new Map(current.map((c) => [c.steamAppId, c.current]))
-
-  const resolved = await resolveOptions(current)
-  if (!resolved.ok) return { outcomes: [], problem: resolved.reason }
-
-  const byAppId = new Map(resolved.data.map((r) => [r.steamAppId, r]))
-  const outcomes: Outcome[] = []
-
-  for (const row of rows.data) {
-    const target = byAppId.get(row.steamAppId)
-    if (!target) continue
-    const was = currentByAppId.get(row.steamAppId) ?? ''
-    const base = { name: row.name, current: was, target: target.desired }
-
-    if (!target.changed) {
-      outcomes.push({ ...base, state: 'already-correct' })
-      // Reported anyway: "already correct" is exactly as much of an answer to "are this game's
-      // launch options set?" as having just written them, and doctor should be able to say so.
-      // Not in dry run — nothing has been confirmed if nothing was allowed to act.
-      if (write) await report(row.steamAppId, true, null)
-      continue
-    }
-
-    // Dry run stops here, having read everything and changed nothing. This is the mode a first run
-    // on real hardware wants: if the field this plugin reads is the wrong one, it sees an empty
-    // string, concludes the game has no options, and would clobber a real mangohud line. Better to
-    // be shown that in a list than to discover it afterwards.
-    if (!write) {
-      outcomes.push({ ...base, state: 'would-write' })
-      continue
-    }
-
-    try {
-      SteamClient.Apps.SetAppLaunchOptions(row.steamAppId, target.desired)
-      outcomes.push({ ...base, state: 'written' })
-      await report(row.steamAppId, true, null)
-    } catch (err) {
-      const detail = err instanceof Error ? err.message : String(err)
-      outcomes.push({ ...base, state: 'failed', detail })
-      await report(row.steamAppId, false, detail)
-    }
-  }
-
-  return { outcomes }
-}
-
-const shortState = (o: Outcome) =>
-  o.state === 'written' ? 'set'
-    : o.state === 'already-correct' ? 'ok'
-      : o.state === 'would-write' ? 'would change'
-        : 'failed'
-
-/** One line the user can read at a glance, so the list below is detail rather than the answer. */
-function summarise(outcomes: Outcome[]): string {
-  const n = (s: Outcome['state']) => outcomes.filter((o) => o.state === s).length
-  const parts = [`${outcomes.length} game${outcomes.length === 1 ? '' : 's'}`]
-  if (n('already-correct')) parts.push(`${n('already-correct')} already set`)
-  if (n('would-write')) parts.push(`${n('would-write')} would change`)
-  if (n('written')) parts.push(`${n('written')} set`)
-  if (n('failed')) parts.push(`${n('failed')} failed`)
-  return parts.join(' · ')
-}
 
 /**
  * "Your other machine has this game checked out."
@@ -241,7 +43,7 @@ function summarise(outcomes: Outcome[]): string {
  * holding a Deck about to press play. Here it reaches the user at the only moment it can act on.
  */
 function LeaseWarnings({ warnings, onDismiss }: {
-  warnings: LeaseWarning[]
+  warnings: AgentState['leaseWarnings']
   onDismiss: (gameName: string) => void
 }) {
   if (warnings.length === 0) return null
@@ -472,7 +274,7 @@ const ALL_GAMES = '__all_games__'
  */
 let stickyTarget: string | null = null
 
-function Sync({ games }: { games: TrackedGame[] }) {
+function Sync({ games, onActionStarted }: { games: TrackedGame[]; onActionStarted: () => void }) {
   const [target, setTargetState] = useState<string | null>(stickyTarget) // null = all games
   const setTarget = (value: string | null) => { stickyTarget = value; setTargetState(value) }
   const [busy, setBusy] = useState<string | null>(null)
@@ -485,20 +287,70 @@ function Sync({ games }: { games: TrackedGame[] }) {
     const label = `${force ? 'force ' : ''}${action} ${targetName}`
     setBusy(label)
     setProblem(null)
+    onActionStarted()
     try {
       const r = await runSync(action, target, force)
       if (r.ok) {
         setResult({ label, exitCode: r.data.exitCode, output: r.data.output })
         // A manual sync is worth announcing even though the result is listed below: it can take a
         // while, and the user may have closed the panel or started a game before it finishes.
-        toaster.toast({
-          title: 'SaveLocker',
-          body: r.data.exitCode === 0 ? `${label} finished` : `${label} failed — see the plugin`,
-        })
+        //
+        // `exitCode === 0` is not "it worked" here — the CLI exits 0 for a refusal too (see
+        // `classifySyncOutput`'s doc comment in gamingSync.tsx), and the agent's own hash diff means
+        // a clean exit often means nothing needed to change at all. `force` bypasses that diff
+        // entirely (always writes), so the up-to-date distinction only applies to a plain sync.
+        const outcome = force ? null : classifySyncOutput(action, r.data.output)
+        const body = outcome === 'up-to-date' ? `${targetName} is already up to date`
+          : outcome === 'blocked' ? `${label} was blocked — see the plugin`
+            : `${label} finished`
+        toaster.toast({ title: 'SaveLocker', body })
       } else {
         setResult(null)
         setProblem(r.reason)
       }
+    } finally {
+      setBusy(null)
+    }
+  }
+
+  // Pull then push, back to back — a plain "sync it" for someone who doesn't want to think about
+  // which direction they need. Both legs are independently safe (neither can lose data without
+  // `--force`), so a refused/failed pull does not stop the push attempt: they're reported together,
+  // not gated on each other.
+  const syncBoth = async () => {
+    const label = `sync ${targetName}`
+    setBusy(label)
+    setProblem(null)
+    onActionStarted()
+    try {
+      const pull = await runSync('pull', target, false)
+      onActionStarted() // the push leg starts its own, separate activity phase, worth its own poke
+      const push = await runSync('push', target, false)
+      if (!pull.ok && !push.ok) {
+        setResult(null)
+        setProblem(pull.reason)
+        return
+      }
+      const lines = [
+        pull.ok ? `pull: exit ${pull.data.exitCode}` : `pull: could not run (${pull.reason})`,
+        pull.ok ? pull.data.output : '',
+        push.ok ? `push: exit ${push.data.exitCode}` : `push: could not run (${push.reason})`,
+        push.ok ? push.data.output : '',
+      ].filter((l) => l.trim() !== '')
+      const exitCode = (pull.ok ? pull.data.exitCode : 1) || (push.ok ? push.data.exitCode : 1)
+      setResult({ label, exitCode, output: lines.join('\n') })
+      // Same reasoning as `go()` above: exit code doesn't distinguish "blocked" from "nothing to do"
+      // from "actually synced", so this reads the agent's own words instead. "Changed" wins over
+      // "up to date" if either leg's classification says so — one leg doing real work is the more
+      // useful headline than the other leg (or a multi-game batch) having nothing to do.
+      const pullOutcome = pull.ok ? classifySyncOutput('pull', pull.data.output) : 'blocked'
+      const pushOutcome = push.ok ? classifySyncOutput('push', push.data.output) : 'blocked'
+      const body = pullOutcome === 'blocked' || pushOutcome === 'blocked'
+        ? `${label} finished with issues — see the plugin`
+        : pullOutcome === 'up-to-date' && pushOutcome === 'up-to-date'
+          ? `${targetName} is already up to date`
+          : `${label} finished`
+      toaster.toast({ title: 'SaveLocker', body })
     } finally {
       setBusy(null)
     }
@@ -538,25 +390,41 @@ function Sync({ games }: { games: TrackedGame[] }) {
         />
       </PanelSectionRow>
 
+      {/* Push/Force push share a row, Pull/Force pull share a row, and Sync sits alone between
+          them — the plain action next to its destructive variant, with the one-click bidirectional
+          shortcut set apart rather than buried in the same rank as five other buttons. */}
       <PanelSectionRow>
-        <ButtonItem layout="below" disabled={busy !== null} onClick={() => void go('push', false)}>
-          {busy === `push ${targetName}` ? 'Pushing…' : `Push ${targetName}`}
+        <Focusable style={{ display: 'flex', gap: '6px' }}>
+          <div style={{ flex: 1 }}>
+            <ButtonItem layout="below" disabled={busy !== null} onClick={() => void go('push', false)}>
+              {busy === `push ${targetName}` ? 'Pushing…' : 'Push'}
+            </ButtonItem>
+          </div>
+          <div style={{ flex: 1 }}>
+            <ButtonItem layout="below" disabled={busy !== null} onClick={() => confirmForce('push')}>
+              Force push…
+            </ButtonItem>
+          </div>
+        </Focusable>
+      </PanelSectionRow>
+      <PanelSectionRow>
+        <ButtonItem layout="below" disabled={busy !== null} onClick={() => void syncBoth()}>
+          {busy === `sync ${targetName}` ? 'Syncing…' : `Sync ${targetName}`}
         </ButtonItem>
       </PanelSectionRow>
       <PanelSectionRow>
-        <ButtonItem layout="below" disabled={busy !== null} onClick={() => void go('pull', false)}>
-          {busy === `pull ${targetName}` ? 'Pulling…' : `Pull ${targetName}`}
-        </ButtonItem>
-      </PanelSectionRow>
-      <PanelSectionRow>
-        <ButtonItem layout="below" disabled={busy !== null} onClick={() => confirmForce('push')}>
-          {`Force push ${targetName}…`}
-        </ButtonItem>
-      </PanelSectionRow>
-      <PanelSectionRow>
-        <ButtonItem layout="below" disabled={busy !== null} onClick={() => confirmForce('pull')}>
-          {`Force pull ${targetName}…`}
-        </ButtonItem>
+        <Focusable style={{ display: 'flex', gap: '6px' }}>
+          <div style={{ flex: 1 }}>
+            <ButtonItem layout="below" disabled={busy !== null} onClick={() => void go('pull', false)}>
+              {busy === `pull ${targetName}` ? 'Pulling…' : 'Pull'}
+            </ButtonItem>
+          </div>
+          <div style={{ flex: 1 }}>
+            <ButtonItem layout="below" disabled={busy !== null} onClick={() => confirmForce('pull')}>
+              Force pull…
+            </ButtonItem>
+          </div>
+        </Focusable>
       </PanelSectionRow>
 
       {problem && (
@@ -592,78 +460,47 @@ function Sync({ games }: { games: TrackedGame[] }) {
 }
 
 /**
- * `savelocker doctor`, on demand.
- *
- * Doctor is the only diagnostic a Deck has, and reaching it otherwise means Desktop Mode and a
- * terminal. On-demand only: it makes network calls and takes seconds, so it must never sit on a
- * timer behind a panel the user opened for something else.
+ * What the agent is doing right now, right under Status — the "is something happening" answer.
+ * Hidden entirely at Idle: an empty bar is worse than no bar, since it invites checking whether it's
+ * stuck. The full history (ActivityLog) lives on the full-screen page now, not here.
  */
-function Diagnostics() {
-  const [busy, setBusy] = useState(false)
-  const [result, setResult] = useState<DoctorResult | null>(null)
-  const [problem, setProblem] = useState<string | null>(null)
+function Progress({ activity }: { activity: ActivityDto | null }) {
+  const current = activity?.current
+  if (!current || current.phase === 'Idle') return null
 
-  const run = async () => {
-    setBusy(true)
-    setProblem(null)
-    try {
-      const r = await runDoctor()
-      if (r.ok) setResult(r.data)
-      else { setResult(null); setProblem(r.reason) }
-    } finally {
-      setBusy(false)
-    }
-  }
+  // Byte progress only ever exists for a push (the agent only reports it on the upload chunk loop) —
+  // pulling and the post-game settle wait get an indeterminate bar rather than a fabricated percent.
+  const pct = current.phase === 'Pushing' && current.bytesTotal > 0
+    ? Math.min(100, Math.round((current.bytesDone / current.bytesTotal) * 100))
+    : null
 
   return (
-    <PanelSection title="Diagnostics">
+    <PanelSection title="Syncing">
       <PanelSectionRow>
-        <ButtonItem layout="below" disabled={busy} onClick={() => void run()}>
-          {busy ? 'Running doctor…' : 'Run doctor'}
-        </ButtonItem>
+        <ReadOnlyRow>
+          <div style={{ fontSize: '0.85em', marginBottom: '4px' }}>
+            {(current.gameName ?? 'a game') + ' — ' + current.phase.toLowerCase()}
+            {pct !== null && ` (${pct}%)`}
+          </div>
+          <div style={{ background: 'rgba(255,255,255,0.15)', borderRadius: '3px', height: '5px', overflow: 'hidden' }}>
+            <div style={{
+              background: 'rgba(255,255,255,0.6)',
+              height: '100%',
+              width: pct !== null ? `${pct}%` : '35%',
+              opacity: pct !== null ? 1 : 0.7,
+            }} />
+          </div>
+        </ReadOnlyRow>
       </PanelSectionRow>
-      {problem && (
-        <PanelSectionRow>
-          <ReadOnlyRow>
-            {problem === 'no-agent' ? 'SaveLocker is not installed on this device.'
-              : problem === 'timeout' ? 'doctor did not finish within 60 seconds.'
-                : `Could not run doctor (${problem}).`}
-          </ReadOnlyRow>
-        </PanelSectionRow>
-      )}
-      {result && (
-        <PanelSectionRow>
-          <Focusable style={{ display: 'flex', flexDirection: 'column' }}>
-            <ReadOnlyRow>
-              <span style={{ fontSize: '0.8em', opacity: 0.75 }}>
-                {result.exitCode === 0 ? 'No problems found.' : `Exited ${result.exitCode} — see below.`}
-              </span>
-            </ReadOnlyRow>
-            {/* Every line focusable, or the D-pad cannot reach past the fold and doctor's output is
-                far longer than one screen. */}
-            {result.output.split('\n').filter((l) => l.trim() !== '').map((l, i) => (
-              <ReadOnlyRow key={i}>
-                <span style={{ fontSize: '0.72em', whiteSpace: 'pre-wrap', wordBreak: 'break-all' }}>{l}</span>
-              </ReadOnlyRow>
-            ))}
-          </Focusable>
-        </PanelSectionRow>
-      )}
     </PanelSection>
   )
 }
 
 function Content() {
-  const [outcomes, setOutcomes] = useState<Outcome[]>([])
-  const [problem, setProblem] = useState<string | undefined>()
-  const [busy, setBusy] = useState(false)
-  // Off on every load, deliberately, and not persisted. Writing to Steam's launch options is the
-  // only destructive thing here, and it should be an act rather than a setting someone turned on
-  // once. Turn it on after a dry run shows the right values.
-  const [write, setWrite] = useState(false)
   const [state, setState] = useState<AgentState | null>(null)
   const [version, setVersion] = useState<AgentVersion | null>(null)
   const [games, setGames] = useState<TrackedGame[]>([])
+  const [activity, setActivity] = useState<ActivityDto | null>(null)
   // Which warnings have already been toasted, so a standing warning is announced once rather than
   // every refresh. A panel that toasts the same thing every minute gets uninstalled.
   const [toasted, setToasted] = useState<Set<string>>(new Set())
@@ -687,6 +524,21 @@ function Content() {
     }
   }
 
+  const refreshActivity = async () => {
+    const a = await fetchActivity()
+    if (a.ok) setActivity(a.data)
+  }
+
+  // The 2s interval below is fine for a sync already in flight, but a press-and-wait for the next
+  // tick means a short pull/push can finish before the bar ever shows up at all. Poll right away
+  // when something is KNOWN to have just started, plus once more shortly after — the agent's own
+  // SyncActivityTracker.Begin() call happens a beat after the CLI process spawns, not the instant
+  // this plugin's subprocess call returns, so a single immediate poll can still land just before it.
+  const pokeActivity = () => {
+    void refreshActivity()
+    setTimeout(() => void refreshActivity(), 400)
+  }
+
   const dismiss = async (gameName: string) => {
     await dismissWarning(gameName)
     // Forget it here too, or the same warning could never be announced again this session.
@@ -698,122 +550,86 @@ function Content() {
     await refreshStatus()
   }
 
-  const run = async (writeNow: boolean) => {
-    setBusy(true)
-    try {
-      const result = await applyAll(writeNow)
-      setOutcomes(result.outcomes)
-      setProblem(result.problem)
-      // No toast here either. Writes only happen when the user presses the button, and the outcome
-      // list is right underneath it — announcing what someone is already looking at is noise. The
-      // one thing worth interrupting for is a lease warning, which arrives on a timer while the
-      // panel is closed.
-    } finally {
-      setBusy(false)
-    }
+  const openSettings = () => {
+    // CloseSideMenus first, or the QAM overlay stays on top of the freshly-navigated page — the
+    // exact sequence real Decky plugins with a full-page settings screen use (confirmed against
+    // bash-shortcuts' own onClick: CloseSideMenus() then Navigate(), not the reverse).
+    Navigation.CloseSideMenus()
+    Navigation.Navigate(SAVELOCKER_PAGE_ROUTE)
   }
 
   useEffect(() => {
-    // The automatic pass NEVER writes. Only the button does, and only with the toggle on.
-    void run(false)
+    // The automatic pass NEVER writes — it is a slow safety net, and idempotence on the agent side
+    // is what makes re-running it free. Nothing in the QAM shows its result any more (LaunchOptions,
+    // on the full-screen page, is the interactive surface for that now) so the outcome is discarded
+    // here; `report()` inside applyAll is what makes doctor able to answer for a game regardless of
+    // whether this fire-and-forget call is ever looked at.
+    void applyAll(false)
     void refreshStatus()
-    // Enrollment is rare, so this is a slow safety net rather than a poll. Idempotence on the agent
-    // side is what makes re-running it free.
-    const timer = setInterval(() => void run(false), 5 * 60 * 1000)
+    const timer = setInterval(() => void applyAll(false), 5 * 60 * 1000)
     // Status is cheap and time-sensitive in a way launch options are not: a lease taken on another
     // machine while this panel is open is exactly what the warning is for.
     const statusTimer = setInterval(() => void refreshStatus(), 30 * 1000)
-    return () => { clearInterval(timer); clearInterval(statusTimer) }
+
+    // Adaptive, not a flat setInterval: Decky keeps a QAM plugin's content mounted for as long as
+    // the plugin is loaded, not just while the panel is open, so this effect runs continuously for
+    // the whole time Steam is up — including through an entire play session. 2s only matters while
+    // something is actually mid-sync, to keep the progress bar live; the rest of the time (the large
+    // majority of it) this only needs to notice a Gaming-Mode-triggered sync starting, so it backs
+    // off to a much slower poll instead of spending a request every 2s indefinitely for nothing.
+    let activityTimeout: ReturnType<typeof setTimeout>
+    let cancelled = false
+    const scheduleActivity = async () => {
+      const a = await fetchActivity()
+      if (cancelled) return
+      if (a.ok) setActivity(a.data)
+      const idle = !a.ok || a.data.current.phase === 'Idle'
+      activityTimeout = setTimeout(() => void scheduleActivity(), idle ? 10 * 1000 : 2 * 1000)
+    }
+    void scheduleActivity()
+
+    return () => {
+      cancelled = true
+      clearInterval(timer)
+      clearInterval(statusTimer)
+      clearTimeout(activityTimeout)
+    }
   }, [])
 
   return (
     <>
     <LeaseWarnings warnings={state?.leaseWarnings ?? []} onDismiss={(g) => void dismiss(g)} />
     <Status state={state} version={version} />
+    <Progress activity={activity} />
     <StagedUpdate version={version} onSettled={() => void refreshStatus()} />
-    <PanelSection title="Launch options">
+    <Sync games={games} onActionStarted={pokeActivity} />
+    <GamingSyncSettings />
+    <PanelSection title="More">
       <PanelSectionRow>
-        <ToggleField
-          label="Allow writing to Steam"
-          description="Off: read and show what would change. On: actually set launch options."
-          checked={write}
-          onChange={setWrite}
-        />
-      </PanelSectionRow>
-      <PanelSectionRow>
-        <ButtonItem layout="below" disabled={busy} onClick={() => void run(write)}>
-          {busy ? 'Checking…' : write ? 'Apply now' : 'Check (no changes)'}
-        </ButtonItem>
-      </PanelSectionRow>
-
-      {problem === 'no-agent' && (
-        <PanelSectionRow><ReadOnlyRow>SaveLocker is not installed on this device.</ReadOnlyRow></PanelSectionRow>
-      )}
-      {problem === 'unreachable' && (
-        <PanelSectionRow><ReadOnlyRow>The SaveLocker agent is not running.</ReadOnlyRow></PanelSectionRow>
-      )}
-      {problem && problem !== 'no-agent' && problem !== 'unreachable' && (
-        <PanelSectionRow><ReadOnlyRow>Could not reach the SaveLocker agent ({problem}).</ReadOnlyRow></PanelSectionRow>
-      )}
-
-      {!problem && outcomes.length === 0 && (
-        <PanelSectionRow><ReadOnlyRow>No tracked game launches through Steam.</ReadOnlyRow></PanelSectionRow>
-      )}
-
-      {outcomes.length > 0 && (
-        <PanelSectionRow>
-          <ReadOnlyRow>
-            <span style={{ fontSize: '0.85em', opacity: 0.8 }}>{summarise(outcomes)}</span>
-          </ReadOnlyRow>
-        </PanelSectionRow>
-      )}
-
-      {/* Every row is Focusable, and that is load-bearing rather than decorative: Steam's Quick
-          Access panel only scrolls to things the D-pad can reach, so a list of plain <div>s is
-          simply unreachable past the fold — with four games it already overflowed with no way to
-          scroll. Focusable rows also give each game a selection ring, which is how a gamepad user
-          reads a list at all.
-
-          Only rows that need attention print their strings. A run where everything is already
-          correct is the common case and should be four short lines, not four paragraphs. */}
-      <PanelSectionRow>
-        <Focusable style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
-          {outcomes.map((o) => (
-            <ReadOnlyRow key={o.name}>
-              <div style={{ fontSize: '0.8em', width: '100%' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', gap: '6px' }}>
-                <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {o.name}
-                </span>
-                <span style={{ flexShrink: 0, opacity: 0.75 }}>{shortState(o)}</span>
-              </div>
-
-              {/* The current value is the whole diagnostic on a first run: a game known to carry
-                  mangohud that reads back "(empty)" proves the wrong field is being read, and that
-                  it must not be allowed to write. */}
-              {o.state !== 'already-correct' && (
-                <div style={{ opacity: 0.7, wordBreak: 'break-all', marginTop: '2px' }}>
-                  <div>now: {o.current === '' ? '(empty)' : o.current}</div>
-                  <div>target: {o.target}</div>
-                  {o.detail && <div>error: {o.detail}</div>}
-                </div>
-              )}
-              </div>
-            </ReadOnlyRow>
-          ))}
-        </Focusable>
+        <ButtonItem layout="below" onClick={openSettings}>Settings</ButtonItem>
       </PanelSectionRow>
     </PanelSection>
-    <Sync games={games} />
-    <Diagnostics />
     </>
   )
 }
 
-export default definePlugin(() => ({
-  name: 'SaveLocker',
-  titleView: <div className={staticClasses.Title}>SaveLocker</div>,
-  content: <Content />,
-  icon: <FaGamepad />,
-  onDismount() { /* the interval is owned by Content's effect */ },
-}))
+export default definePlugin(() => {
+  // Wired once, at plugin load, rather than from Content()'s mount — see registerGamingModeSync's
+  // own doc comment in gamingSync.tsx for why that timing matters.
+  registerGamingModeSync()
+  registerLibraryOverlay()
+  routerHook.addRoute(SAVELOCKER_PAGE_ROUTE, FullPage)
+  return {
+    name: 'SaveLocker',
+    titleView: <div className={staticClasses.Title}>SaveLocker</div>,
+    content: <Content />,
+    icon: <FaGamepad />,
+    onDismount() {
+      // The interval is owned by Content's effect; the route and the library-page patch are owned
+      // by the plugin's own lifetime, not any one component's, so both are removed here rather than
+      // in a component's own cleanup.
+      routerHook.removeRoute(SAVELOCKER_PAGE_ROUTE)
+      unregisterLibraryOverlay()
+    },
+  }
+})

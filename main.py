@@ -128,10 +128,56 @@ def _agent_binary() -> str | None:
     return None
 
 
+def _settings_path() -> str:
+    return os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "settings.json")
+
+
+def _read_settings() -> dict:
+    """
+    This plugin's own tiny local settings — Decky's plugin settings dir, not the agent's state
+    directory, so the "read the token; write nothing there" rule above does not apply here. Kept to
+    a single JSON file rather than pulling in a settings-manager dependency for one boolean.
+    """
+    try:
+        with open(_settings_path(), "r", encoding="utf-8") as handle:
+            return json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _write_settings(settings: dict) -> None:
+    os.makedirs(decky.DECKY_PLUGIN_SETTINGS_DIR, exist_ok=True)
+    with open(_settings_path(), "w", encoding="utf-8") as handle:
+        json.dump(settings, handle)
+
+
 class Plugin:
+    async def plugin_version(self):
+        """
+        This plugin's own version — not the agent's (see `agent_version`). Read straight from
+        package.json next to this file rather than hardcoded, so it is never stale and so testenv.ps1's
+        isolated test build (which rewrites that file's "version" to a "-test"-suffixed one before
+        staging) reports its own version here too, distinct from a real install's.
+        """
+        try:
+            path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "package.json")
+            with open(path, "r", encoding="utf-8") as handle:
+                return json.load(handle).get("version", "unknown")
+        except (OSError, json.JSONDecodeError):
+            return "unknown"
+
     async def state(self):
         """Connection, machine, last sync, and any lease warnings this device is holding."""
         return _request("/api/state")
+
+    async def activity(self):
+        """
+        What is syncing right now (with byte progress for a push) and a short rolling history of
+        what just happened — the same feed the agent's own local web UI polls for its Overview page.
+        Cheap: an in-memory read on the agent's side, so this is safe to poll far more often than
+        `state()`.
+        """
+        return _request("/api/activity")
 
     async def agent_version(self):
         """Current version, and whether the agent has a newer one waiting."""
@@ -226,6 +272,52 @@ class Plugin:
     async def games(self):
         """Every game this machine tracks — not just the ones Steam launches."""
         return _request("/api/games")
+
+    async def set_alias(self, game_id: str, alias: str | None):
+        """
+        Set (or clear, with `alias=None`) a game's manual name-match override — the fallback Gaming
+        Mode detection uses for a game whose Steam AppID this agent has not resolved, since the
+        primary match (`rows()`'s `steamAppId`) has nothing to go on for those.
+        """
+        return _request("/api/games/%s/alias" % game_id, {"alias": alias})
+
+    async def gaming_sync_enabled(self):
+        """Whether Gaming Mode launch/close detection should act. On by default."""
+        return _read_settings().get("gamingSyncEnabled", True)
+
+    async def set_gaming_sync_enabled(self, enabled: bool):
+        settings = _read_settings()
+        settings["gamingSyncEnabled"] = enabled
+        _write_settings(settings)
+
+    async def set_pull_before_launch(self, game_id: str, enabled: bool | None):
+        """
+        Set (or clear, with `enabled=None`) this game's Gaming Mode pre-launch-pull override —
+        post-exit push is never gated by this, only the pull. Agent-side, not a local settings file:
+        every machine syncing this game agrees on it, same reasoning as `set_alias`. `games()` already
+        reports the current value back as `pullBeforeLaunchEnabled`, so there is no matching getter
+        here.
+        """
+        return _request("/api/games/%s/pull-before-launch" % game_id, {"enabled": enabled})
+
+    async def gaming_sync_on_open_overrides(self):
+        """
+        Per-game overrides for whether opening a game's Steam library page also triggers a pre-launch
+        pull, not just pressing Play. Local settings, not agent-side like `pull-before-launch` above:
+        this is Gaming Mode UI behavior specific to this device's Decky plugin, not a save-sync
+        preference every machine needs to agree on. On by default — this dict only ever holds entries
+        for games the user explicitly turned OFF, so `game_id not in overrides` means enabled.
+        """
+        return _read_settings().get("syncOnOpenOverrides", {})
+
+    async def set_gaming_sync_on_open(self, game_id: str, enabled: bool | None):
+        settings = _read_settings()
+        overrides = settings.setdefault("syncOnOpenOverrides", {})
+        if enabled is None:
+            overrides.pop(game_id, None)
+        else:
+            overrides[game_id] = enabled
+        _write_settings(settings)
 
     async def sync(self, action: str, game: str | None = None, force: bool = False):
         """
