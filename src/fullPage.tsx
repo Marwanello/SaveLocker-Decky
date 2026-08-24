@@ -9,7 +9,7 @@ import {
   type ActivityDto, type ActivityLogEntry, type AgentResult, type AgentState, type AgentVersion,
   type DoctorResult, type Outcome, type TrackedGame,
 } from './shared'
-import { resolvePullEnabled } from './gamingSync'
+import { persistSyncOnOpen, resolvePullEnabled } from './gamingSync'
 
 /**
  * The full-screen SaveLocker page — everything that was crowding the Quick Access panel (per-game
@@ -22,17 +22,24 @@ export const SAVELOCKER_PAGE_ROUTE = '/savelocker'
 
 const setAlias = callable<[string, string | null], AgentResult<null>>('set_alias')
 const persistPullBeforeLaunch = callable<[string, boolean | null], AgentResult<null>>('set_pull_before_launch')
+const fetchSyncOnOpenOverrides = callable<[], Record<string, boolean>>('gaming_sync_on_open_overrides')
 
 /**
  * One game's row in the Overview tab's list: name, the effective alias (defaulting to the game's
  * own name, same as the old QAM picker did), and the pull-before-launch toggle — all inline, no
  * dropdown, so there's nothing here that depends on the QAM's own dropdown-remounts-the-panel quirk.
  */
-function GameRow({ game, onChanged }: { game: TrackedGame; onChanged: () => void }) {
+function GameRow({ game, syncOnOpenEnabled, onChanged, onSyncOnOpenChanged }: {
+  game: TrackedGame
+  syncOnOpenEnabled: boolean
+  onChanged: () => void
+  onSyncOnOpenChanged: (gameId: string, value: boolean) => void
+}) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState('')
   const [busy, setBusy] = useState(false)
   const [pullBusy, setPullBusy] = useState(false)
+  const [syncOnOpenBusy, setSyncOnOpenBusy] = useState(false)
 
   const effective = game.alias ?? game.name
   const pullEnabled = resolvePullEnabled(game)
@@ -75,6 +82,18 @@ function GameRow({ game, onChanged }: { game: TrackedGame; onChanged: () => void
     }
   }
 
+  // No AgentResult here (unlike togglePull above) — `set_gaming_sync_on_open` is a local settings
+  // write, not an agent round trip, so there is nothing that can come back `{ ok: false }`.
+  const toggleSyncOnOpen = async (value: boolean) => {
+    setSyncOnOpenBusy(true)
+    try {
+      await persistSyncOnOpen(game.gameId, value)
+      onSyncOnOpenChanged(game.gameId, value)
+    } finally {
+      setSyncOnOpenBusy(false)
+    }
+  }
+
   return (
     <Focusable
       style={{
@@ -83,10 +102,15 @@ function GameRow({ game, onChanged }: { game: TrackedGame; onChanged: () => void
       }}
     >
       <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
-        <div style={{ flex: '1 1 220px', minWidth: 0 }}>
-          <div style={{ fontSize: '15px' }}>{game.name}</div>
+        <div style={{ flex: '1 1 140px', minWidth: 0 }}>
+          <div style={{ fontSize: '15px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {game.name}
+          </div>
           {!editing && (
-            <div style={{ fontSize: '12px', opacity: 0.65 }}>
+            <div style={{
+              fontSize: '12px', opacity: 0.65, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+            }}
+            >
               alias: {effective} · {game.hasSteamCloud ? 'Steam Cloud' : 'no Steam Cloud'}
             </div>
           )}
@@ -96,14 +120,51 @@ function GameRow({ game, onChanged }: { game: TrackedGame; onChanged: () => void
           // side by side in the same row — without this they inherit the list's vertical "down"
           // flow, so left/right would fall through this row's boundary before ever switching
           // between them, instead of picking one and reserving down for the next game.
-          <Focusable flow-children="right" style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-            <ToggleField
-              label="Pull before launch"
-              checked={pullEnabled}
-              disabled={pullBusy}
-              onChange={(value: boolean) => void togglePull(value)}
-            />
-            <DialogButton onClick={startEdit} style={{ width: 'auto', minWidth: 0, padding: '8px 14px' }}>
+          //
+          // flexShrink: 0 + flexWrap: 'nowrap' here, and a fixed width on each ToggleField's own
+          // wrapper below: Steam's `ToggleField` (pulled from CommonUIModule, not this plugin's own
+          // component) lays itself out to fill 100% of whatever it's given rather than sizing to its
+          // label, so left unconstrained inside a flex row it claims far more width than the visible
+          // switch+label need — enough that adding the second toggle overflowed this row and pushed
+          // the OUTER row (the one with the game name) to wrap onto a new line entirely, rather than
+          // just this inner row reflowing on its own. Each toggle's fixed-width wrapper below caps
+          // that 100% against something narrow instead of the page.
+          <Focusable
+            flow-children="right"
+            style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'nowrap', flexShrink: 0 }}
+          >
+            <div style={{ width: '200px', flexShrink: 0 }}>
+              <ToggleField
+                label="Pull before launch"
+                checked={pullEnabled}
+                disabled={pullBusy}
+                onChange={(value: boolean) => void togglePull(value)}
+              />
+            </div>
+            {/* Only shown once "Pull before launch" is on — the setting is meaningless without it,
+                so it disappears rather than showing disabled (a disabled control with no visible
+                reason why invites poking at it to find out). On by default: see
+                `resolveSyncOnOpenEnabled` in gamingSync.tsx.
+
+                This MOVES the pull rather than adding a second one: with it on, opening the game's
+                library page pulls (and the page's status chip reports it), and pressing Play then
+                launches straight through instead of pulling again. `gamingSync.tsx` still falls back
+                to pulling at launch if no page-open pull actually happened — launching from a
+                collection or the Recents row never opens the page at all. */}
+            {pullEnabled && (
+              <div style={{ width: '180px', flexShrink: 0 }}>
+                <ToggleField
+                  label="Sync on page open"
+                  checked={syncOnOpenEnabled}
+                  disabled={syncOnOpenBusy}
+                  onChange={(value: boolean) => void toggleSyncOnOpen(value)}
+                />
+              </div>
+            )}
+            <DialogButton
+              onClick={startEdit}
+              style={{ width: 'auto', minWidth: 0, padding: '8px 14px', flexShrink: 0 }}
+            >
               Edit alias
             </DialogButton>
           </Focusable>
@@ -134,15 +195,17 @@ function OverviewTab() {
   const [activity, setActivity] = useState<ActivityDto | null>(null)
   const [search, setSearch] = useState('')
   const [syncing, setSyncing] = useState(false)
+  const [syncOnOpenOverrides, setSyncOnOpenOverrides] = useState<Record<string, boolean>>({})
 
   const refresh = async () => {
-    const [s, v, g, a] = await Promise.all([
-      fetchState(), fetchVersion(), fetchGames(), fetchActivity(),
+    const [s, v, g, a, o] = await Promise.all([
+      fetchState(), fetchVersion(), fetchGames(), fetchActivity(), fetchSyncOnOpenOverrides(),
     ])
     if (s.ok) setState(s.data)
     if (v.ok) setVersion(v.data)
     if (g.ok) setGames(g.data)
     if (a.ok) setActivity(a.data)
+    setSyncOnOpenOverrides(o)
   }
 
   useEffect(() => {
@@ -223,7 +286,17 @@ function OverviewTab() {
           </div>
         )}
         {filtered.map((g) => (
-          <GameRow key={g.gameId} game={g} onChanged={() => void refresh()} />
+          <GameRow
+            key={g.gameId}
+            game={g}
+            syncOnOpenEnabled={syncOnOpenOverrides[g.gameId] ?? true}
+            onChanged={() => void refresh()}
+            onSyncOnOpenChanged={(gameId, value) => {
+              // Optimistic, same reasoning as togglePull's onChanged(): don't wait out the next
+              // 5s poll to see the toggle you just flipped reflect back.
+              setSyncOnOpenOverrides((prev) => ({ ...prev, [gameId]: value }))
+            }}
+          />
         ))}
       </Focusable>
 

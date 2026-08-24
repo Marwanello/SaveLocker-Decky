@@ -6,6 +6,8 @@ import {
 import { callable, definePlugin, routerHook, toaster } from '@decky/api'
 import { FaGamepad } from 'react-icons/fa'
 import { GamingSyncSettings, registerGamingModeSync } from './gamingSync'
+import { classifySyncOutput } from './syncStatus'
+import { registerLibraryOverlay, unregisterLibraryOverlay } from './libraryOverlay'
 import { FullPage, SAVELOCKER_PAGE_ROUTE } from './fullPage'
 import {
   ReadOnlyRow, applyAll, fetchActivity, fetchGames, fetchState, fetchVersion, runSync,
@@ -292,10 +294,16 @@ function Sync({ games, onActionStarted }: { games: TrackedGame[]; onActionStarte
         setResult({ label, exitCode: r.data.exitCode, output: r.data.output })
         // A manual sync is worth announcing even though the result is listed below: it can take a
         // while, and the user may have closed the panel or started a game before it finishes.
-        toaster.toast({
-          title: 'SaveLocker',
-          body: r.data.exitCode === 0 ? `${label} finished` : `${label} failed — see the plugin`,
-        })
+        //
+        // `exitCode === 0` is not "it worked" here — the CLI exits 0 for a refusal too (see
+        // `classifySyncOutput`'s doc comment in gamingSync.tsx), and the agent's own hash diff means
+        // a clean exit often means nothing needed to change at all. `force` bypasses that diff
+        // entirely (always writes), so the up-to-date distinction only applies to a plain sync.
+        const outcome = force ? null : classifySyncOutput(action, r.data.output)
+        const body = outcome === 'up-to-date' ? `${targetName} is already up to date`
+          : outcome === 'blocked' ? `${label} was blocked — see the plugin`
+            : `${label} finished`
+        toaster.toast({ title: 'SaveLocker', body })
       } else {
         setResult(null)
         setProblem(r.reason)
@@ -331,10 +339,18 @@ function Sync({ games, onActionStarted }: { games: TrackedGame[]; onActionStarte
       ].filter((l) => l.trim() !== '')
       const exitCode = (pull.ok ? pull.data.exitCode : 1) || (push.ok ? push.data.exitCode : 1)
       setResult({ label, exitCode, output: lines.join('\n') })
-      toaster.toast({
-        title: 'SaveLocker',
-        body: exitCode === 0 ? `${label} finished` : `${label} finished with issues — see the plugin`,
-      })
+      // Same reasoning as `go()` above: exit code doesn't distinguish "blocked" from "nothing to do"
+      // from "actually synced", so this reads the agent's own words instead. "Changed" wins over
+      // "up to date" if either leg's classification says so — one leg doing real work is the more
+      // useful headline than the other leg (or a multi-game batch) having nothing to do.
+      const pullOutcome = pull.ok ? classifySyncOutput('pull', pull.data.output) : 'blocked'
+      const pushOutcome = push.ok ? classifySyncOutput('push', push.data.output) : 'blocked'
+      const body = pullOutcome === 'blocked' || pushOutcome === 'blocked'
+        ? `${label} finished with issues — see the plugin`
+        : pullOutcome === 'up-to-date' && pushOutcome === 'up-to-date'
+          ? `${targetName} is already up to date`
+          : `${label} finished`
+      toaster.toast({ title: 'SaveLocker', body })
     } finally {
       setBusy(null)
     }
@@ -601,6 +617,7 @@ export default definePlugin(() => {
   // Wired once, at plugin load, rather than from Content()'s mount — see registerGamingModeSync's
   // own doc comment in gamingSync.tsx for why that timing matters.
   registerGamingModeSync()
+  registerLibraryOverlay()
   routerHook.addRoute(SAVELOCKER_PAGE_ROUTE, FullPage)
   return {
     name: 'SaveLocker',
@@ -608,9 +625,11 @@ export default definePlugin(() => {
     content: <Content />,
     icon: <FaGamepad />,
     onDismount() {
-      // The interval is owned by Content's effect; the route is owned by the plugin's own lifetime,
-      // not any one component's, so it is removed here rather than in a component's own cleanup.
+      // The interval is owned by Content's effect; the route and the library-page patch are owned
+      // by the plugin's own lifetime, not any one component's, so both are removed here rather than
+      // in a component's own cleanup.
       routerHook.removeRoute(SAVELOCKER_PAGE_ROUTE)
+      unregisterLibraryOverlay()
     },
   }
 })

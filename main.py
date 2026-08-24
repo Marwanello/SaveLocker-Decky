@@ -300,6 +300,25 @@ class Plugin:
         """
         return _request("/api/games/%s/pull-before-launch" % game_id, {"enabled": enabled})
 
+    async def gaming_sync_on_open_overrides(self):
+        """
+        Per-game overrides for whether opening a game's Steam library page also triggers a pre-launch
+        pull, not just pressing Play. Local settings, not agent-side like `pull-before-launch` above:
+        this is Gaming Mode UI behavior specific to this device's Decky plugin, not a save-sync
+        preference every machine needs to agree on. On by default — this dict only ever holds entries
+        for games the user explicitly turned OFF, so `game_id not in overrides` means enabled.
+        """
+        return _read_settings().get("syncOnOpenOverrides", {})
+
+    async def set_gaming_sync_on_open(self, game_id: str, enabled: bool | None):
+        settings = _read_settings()
+        overrides = settings.setdefault("syncOnOpenOverrides", {})
+        if enabled is None:
+            overrides.pop(game_id, None)
+        else:
+            overrides[game_id] = enabled
+        _write_settings(settings)
+
     async def sync(self, action: str, game: str | None = None, force: bool = False):
         """
         Run `savelocker push|pull [game|all] [--force]`.
