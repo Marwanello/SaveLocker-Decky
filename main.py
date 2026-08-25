@@ -145,10 +145,20 @@ def _read_settings() -> dict:
         return {}
 
 
-def _write_settings(settings: dict) -> None:
-    os.makedirs(decky.DECKY_PLUGIN_SETTINGS_DIR, exist_ok=True)
-    with open(_settings_path(), "w", encoding="utf-8") as handle:
-        json.dump(settings, handle)
+def _write_settings(settings: dict) -> bool:
+    """
+    Returns whether the write landed. Errors are caught and logged rather than raised so the
+    settings callables below resolve `False` instead of rejecting into the frontend's optimistic
+    toggles (which apply the change before awaiting and do not catch a rejection).
+    """
+    try:
+        os.makedirs(decky.DECKY_PLUGIN_SETTINGS_DIR, exist_ok=True)
+        with open(_settings_path(), "w", encoding="utf-8") as handle:
+            json.dump(settings, handle)
+        return True
+    except OSError as err:
+        decky.logger.warning("could not write plugin settings: %s", err)
+        return False
 
 
 class Plugin:
@@ -288,7 +298,7 @@ class Plugin:
     async def set_gaming_sync_enabled(self, enabled: bool):
         settings = _read_settings()
         settings["gamingSyncEnabled"] = enabled
-        _write_settings(settings)
+        return _write_settings(settings)
 
     async def set_pull_before_launch(self, game_id: str, enabled: bool | None):
         """
@@ -317,7 +327,7 @@ class Plugin:
             overrides.pop(game_id, None)
         else:
             overrides[game_id] = enabled
-        _write_settings(settings)
+        return _write_settings(settings)
 
     async def sync(self, action: str, game: str | None = None, force: bool = False):
         """

@@ -5,7 +5,7 @@ import {
 } from '@decky/ui'
 import { callable, definePlugin, routerHook, toaster } from '@decky/api'
 import { FaGamepad } from 'react-icons/fa'
-import { GamingSyncSettings, registerGamingModeSync } from './gamingSync'
+import { GamingSyncSettings, registerGamingModeSync, unregisterGamingModeSync } from './gamingSync'
 import { classifySyncOutput } from './syncStatus'
 import { registerLibraryOverlay, unregisterLibraryOverlay } from './libraryOverlay'
 import { FullPage, SAVELOCKER_PAGE_ROUTE } from './fullPage'
@@ -625,11 +625,13 @@ export default definePlugin(() => {
     content: <Content />,
     icon: <FaGamepad />,
     onDismount() {
-      // The interval is owned by Content's effect; the route and the library-page patch are owned
-      // by the plugin's own lifetime, not any one component's, so both are removed here rather than
-      // in a component's own cleanup.
+      // The route, the library-page patch, and the Gaming Mode launch/close listeners are all owned
+      // by the plugin's own lifetime, not any one component's, so all three are torn down here rather
+      // than in a component's own cleanup — otherwise a plugin reload leaves the old listeners firing
+      // alongside the freshly-registered ones. (Content's own polling intervals are owned by its effect.)
       routerHook.removeRoute(SAVELOCKER_PAGE_ROUTE)
       unregisterLibraryOverlay()
+      unregisterGamingModeSync()
     },
   }
 })
