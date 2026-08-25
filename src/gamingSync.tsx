@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { PanelSection, PanelSectionRow, ToggleField } from '@decky/ui'
 import { callable } from '@decky/api'
 import { saveLockerToast } from './toast'
@@ -58,7 +58,21 @@ export const runSyncForGaming =
 const fetchGamingSyncEnabled = callable<[], boolean>('gaming_sync_enabled')
 const persistGamingSyncEnabled = callable<[boolean], void>('set_gaming_sync_enabled')
 const fetchSyncOnOpenOverrides = callable<[], Record<string, boolean>>('gaming_sync_on_open_overrides')
-export const persistSyncOnOpen = callable<[string, boolean | null], void>('set_gaming_sync_on_open')
+const persistSyncOnOpenRaw = callable<[string, boolean | null], void>('set_gaming_sync_on_open')
+
+/**
+ * Persists a game's "sync on page open" override AND mirrors it into the warm `syncCache` right away.
+ * Without the cache write, `resolveSyncOnOpenEnabled` (read by the launch-detection paths) would keep
+ * answering with the pre-change value until the next `refreshSyncCache` — up to the 2-minute timer —
+ * so a setting toggled on the full-screen page wouldn't take effect for the very next launch.
+ */
+export async function persistSyncOnOpen(gameId: string, enabled: boolean | null): Promise<void> {
+  await persistSyncOnOpenRaw(gameId, enabled)
+  if (syncCache) {
+    if (enabled === null) delete syncCache.syncOnOpenOverrides[gameId]
+    else syncCache.syncOnOpenOverrides[gameId] = enabled
+  }
+}
 
 // Module scope, not React state: this needs to be read from a SteamClient callback that fires
 // outside any component's lifetime, same reasoning as index.tsx's `stickyTarget`.
@@ -339,6 +353,11 @@ async function handleGameActionStart(
     selfRelaunching.add(appId)
     try {
       SteamClient.Apps.RunGame(appIdStr, '', 0, launchSource)
+      // Clear the flag if RunGame never produces the matching GameActionStart it's meant to swallow
+      // (some launch sources don't re-enter this hook). Without this the flag sticks and the NEXT
+      // genuine launch of this game is let through with no pre-launch pull. The real self-relaunch
+      // fires within milliseconds, well inside this grace window.
+      setTimeout(() => selfRelaunching.delete(appId), 5000)
     } catch {
       selfRelaunching.delete(appId)
       saveLockerToast('error', `Could not relaunch ${match.name}`, 'Open it again from the library')
@@ -400,6 +419,13 @@ async function handleLifetimeChange(data: SaveLockerAppLifetimeNotification): Pr
 }
 
 let registered = false
+// The handles for everything `registerGamingModeSync` wires up, kept so `unregisterGamingModeSync`
+// can tear them all down. Two SteamClient registrations and the cache-refresh interval — none of
+// which stop on their own — so a plugin reload/update that skipped this would leave the old handlers
+// firing alongside the freshly-registered ones (double pull/push per launch) and leak the interval.
+let lifetimeReg: SaveLockerUnregisterable | null = null
+let gameActionReg: SaveLockerUnregisterable | null = null
+let cacheRefreshTimer: ReturnType<typeof setInterval> | null = null
 
 /**
  * Wires the launch/close listeners once. Called from `definePlugin`'s setup rather than from
@@ -419,16 +445,43 @@ export function registerGamingModeSync(): void {
   registered = true
   void fetchGamingSyncEnabled().then((value) => { gamingSyncEnabled = value })
   void refreshSyncCache()
-  setInterval(() => void refreshSyncCache(), 2 * 60 * 1000)
-  SteamClient.GameSessions.RegisterForAppLifetimeNotifications((data) => void handleLifetimeChange(data))
-  SteamClient.Apps.RegisterForGameActionStart(
+  cacheRefreshTimer = setInterval(() => void refreshSyncCache(), 2 * 60 * 1000)
+  lifetimeReg = SteamClient.GameSessions.RegisterForAppLifetimeNotifications((data) => void handleLifetimeChange(data))
+  gameActionReg = SteamClient.Apps.RegisterForGameActionStart(
     (gameActionId, appId, action, launchSource) =>
       void handleGameActionStart(gameActionId, appId, action, launchSource),
   )
 }
 
+/**
+ * Undoes `registerGamingModeSync`, called from the plugin's own `onDismount` (mirroring
+ * `unregisterLibraryOverlay`). Both SteamClient registrations and the refresh interval are torn down
+ * so a plugin reload doesn't layer a second set of launch/close handlers onto Steam's still-live ones.
+ */
+export function unregisterGamingModeSync(): void {
+  if (!registered) return
+  registered = false
+  try { lifetimeReg?.unregister() } catch { /* already gone */ }
+  try { gameActionReg?.unregister() } catch { /* already gone */ }
+  if (cacheRefreshTimer !== null) clearInterval(cacheRefreshTimer)
+  lifetimeReg = null
+  gameActionReg = null
+  cacheRefreshTimer = null
+}
+
 export function GamingSyncSettings() {
   const [enabled, setEnabled] = useState(gamingSyncEnabled)
+
+  // `gamingSyncEnabled` is seeded to `true` and only corrected asynchronously by
+  // `registerGamingModeSync`'s `fetchGamingSyncEnabled().then(...)`. If this panel mounts before that
+  // resolves, the initial state above is the stale default — so re-read the persisted value on mount
+  // and reconcile both the local state and the module var rather than showing ON until a remount.
+  useEffect(() => {
+    void fetchGamingSyncEnabled().then((value) => {
+      gamingSyncEnabled = value
+      setEnabled(value)
+    })
+  }, [])
 
   return (
     <PanelSection title="Gaming Mode sync">

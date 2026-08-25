@@ -150,27 +150,36 @@ function OverlayButtons({ appId, gameName }: { appId: number; gameName: string }
     if (!match || !resolvePullEnabled(match) || !resolveSyncOnOpenEnabled(match.gameId)) return
     setChip(appId, { kind: 'syncing', text: 'Syncing…', pct: null, at: Date.now() })
     const stopTracking = trackProgress('Syncing…')
-    void runPull(appId, match.name).then((r) => {
-      stopTracking()
-      // Recorded whatever the outcome: `gamingSync.tsx`'s launch path reads this to decide whether it
-      // can skip its own pre-launch pull, and a refusal is still a check that happened just now.
-      markPageOpenPull(appId)
-      // Quiet by design: the chip immediately above the Play button is already saying this, and the
-      // user asked not to be toasted for a sync they can see. `reportSyncOutcome` still writes the
-      // chip via `appId`.
-      reportSyncOutcome('pull', match.name, r, { appId, quiet: true })
-    })
+    void runPull(appId, match.name)
+      .then((r) => {
+        // Recorded whatever the outcome: `gamingSync.tsx`'s launch path reads this to decide whether
+        // it can skip its own pre-launch pull, and a refusal is still a check that happened just now.
+        markPageOpenPull(appId)
+        // Quiet by design: the chip immediately above the Play button is already saying this, and the
+        // user asked not to be toasted for a sync they can see. `reportSyncOutcome` still writes the
+        // chip via `appId`.
+        reportSyncOutcome('pull', match.name, r, { appId, quiet: true })
+      })
+      // A rejected pull (transport error) has nothing to report, but must still be caught so it isn't
+      // an unhandled rejection — and `stopTracking` has to run either way (`.finally`), or the
+      // `trackProgress` poll loop keeps running and the chip stays stuck on "Syncing…".
+      .catch(() => { /* nothing to report; chip keeps its last state */ })
+      .finally(() => stopTracking())
   }, [appId])
 
   const go = async (action: 'pull' | 'push' | 'sync') => {
     if (busy) return
     setBusy(action)
+    // Held here (not scoped to each leg) so the `finally` can always stop the tracker — if a sync
+    // call rejects, the explicit `stopTracking()` calls below are skipped, and without this net the
+    // `trackProgress` poll loop would run forever and the chip would stay stuck on "Pulling…".
+    let stopTracking: (() => void) | null = null
     try {
       if (action === 'sync') {
         setChip(appId, { kind: 'syncing', text: 'Pulling…', pct: null, at: Date.now() })
-        let stopTracking = trackProgress('Pulling…')
+        stopTracking = trackProgress('Pulling…')
         const pull = await runLeg('pull', gameName)
-        stopTracking()
+        stopTracking(); stopTracking = null
         if (pull.outcome === 'blocked') {
           reportSyncOutcome('pull', gameName, pull.r, { appId })
           return
@@ -178,7 +187,7 @@ function OverlayButtons({ appId, gameName }: { appId: number; gameName: string }
         setChip(appId, { kind: 'syncing', text: 'Pushing…', pct: null, at: Date.now() })
         stopTracking = trackProgress('Pushing…')
         const push = await runLeg('push', gameName)
-        stopTracking()
+        stopTracking(); stopTracking = null
         if (push.outcome === 'blocked') {
           reportSyncOutcome('push', gameName, push.r, { appId })
           return
@@ -201,13 +210,14 @@ function OverlayButtons({ appId, gameName }: { appId: number; gameName: string }
         setChip(appId, {
           kind: 'syncing', text: action === 'pull' ? 'Pulling…' : 'Pushing…', pct: null, at: Date.now(),
         })
-        const stopTracking = trackProgress(action === 'pull' ? 'Pulling…' : 'Pushing…')
+        stopTracking = trackProgress(action === 'pull' ? 'Pulling…' : 'Pushing…')
         const r = await runSyncForGaming(action, gameName, false)
-        stopTracking()
+        stopTracking(); stopTracking = null
         if (action === 'pull') markPageOpenPull(appId)
         reportSyncOutcome(action, gameName, r, { appId })
       }
     } finally {
+      stopTracking?.()
       setBusy(null)
     }
   }
