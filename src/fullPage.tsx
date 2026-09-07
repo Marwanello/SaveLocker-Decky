@@ -613,6 +613,29 @@ const tabStabilityCss = `
   }
 `
 
+/**
+ * Bug 2: this route always opened scrolled partway down instead of at the top. `Tabs`'s own
+ * `autoFocusContents` (above) focuses something inside the freshly-mounted tab so the gamepad has an
+ * entry point, and Steam's gamepad navigation scrolls whatever holds focus into view — landing
+ * wherever that element happens to sit rather than at the page's own top. Rather than guess which
+ * Steam-owned ancestor is the actual scrolling element (its class names are build-hashed, and the
+ * `[class*="…"]` substrings above already show they can't be hardcoded), this walks every ancestor of
+ * the page root and zeroes `scrollTop` on whichever ones are actually scrollable.
+ *
+ * Run more than once: the focus-driven scroll this is correcting for happens asynchronously (after
+ * `autoFocusContents` settles, and again as each tab's own data fetch resolves and its content's
+ * height changes), so a single reset immediately on mount can be undone a frame or two later by the
+ * same thing this is working around.
+ */
+function resetFullPageScroll(): void {
+  const root = document.querySelector('.savelocker-fullpage')
+  let node: Element | null = root
+  while (node) {
+    if (node.scrollHeight > node.clientHeight) node.scrollTop = 0
+    node = node.parentElement
+  }
+}
+
 export function FullPage() {
   const [activeTab, setActiveTab] = useState('overview')
 
@@ -621,6 +644,13 @@ export function FullPage() {
     { id: 'diagnostics', title: 'Diagnostics', content: <Diagnostics /> },
     { id: 'launch', title: 'Launch options', content: <LaunchOptions /> },
   ]
+
+  useEffect(() => {
+    resetFullPageScroll()
+    const raf = requestAnimationFrame(resetFullPageScroll)
+    const timer = setTimeout(resetFullPageScroll, 300)
+    return () => { cancelAnimationFrame(raf); clearTimeout(timer) }
+  }, [])
 
   return (
     <div className="savelocker-fullpage" style={{ paddingTop: '48px', minHeight: '100%', boxSizing: 'border-box' }}>
