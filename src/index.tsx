@@ -4,14 +4,17 @@ import {
   showModal, staticClasses,
 } from '@decky/ui'
 import { callable, definePlugin, routerHook, toaster } from '@decky/api'
-import { FaGamepad } from 'react-icons/fa'
+import { FaCodeBranch, FaGamepad } from 'react-icons/fa'
 import { GamingSyncSettings, registerGamingModeSync, unregisterGamingModeSync } from './gamingSync'
 import { classifySyncOutput } from './syncStatus'
 import { registerLibraryOverlay, unregisterLibraryOverlay } from './libraryOverlay'
+import {
+  openConflictResolveModal, registerConflictPolling, unregisterConflictPolling, useOpenConflicts,
+} from './conflicts'
 import { FullPage, SAVELOCKER_PAGE_ROUTE } from './fullPage'
 import {
   ReadOnlyRow, applyAll, fetchActivity, fetchGames, fetchState, fetchVersion, runSync,
-  type ActivityDto, type AgentResult, type AgentState, type AgentVersion, type TrackedGame,
+  type ActivityDto, type AgentResult, type AgentState, type AgentVersion, type Conflict, type TrackedGame,
 } from './shared'
 
 /**
@@ -65,6 +68,45 @@ function LeaseWarnings({ warnings, onDismiss }: {
               records it again. That is right: the warning exists to be seen before launching. */}
           <ButtonItem layout="below" onClick={() => onDismiss(w.gameName)}>
             Dismiss {w.gameName}
+          </ButtonItem>
+        </PanelSectionRow>
+      ))}
+    </PanelSection>
+  )
+}
+
+/**
+ * "Your save and the cloud have both changed" — reachable from the QAM even without the library
+ * page open, structurally identical to `LeaseWarnings` above (one focusable read-only row per
+ * conflict, since Steam's D-pad scroll needs a run of focusable blocks with no gaps between them —
+ * see `LeaseWarnings`'s own doc comment). The resolve button opens the same popup the library page's
+ * chip and `savelocker ui`'s Conflicts screen both use, `openConflictResolveModal` from
+ * `conflicts.tsx`.
+ */
+function ConflictWarnings({ conflicts, games, onOpen }: {
+  conflicts: Conflict[]
+  games: TrackedGame[]
+  onOpen: (conflictId: string) => void
+}) {
+  if (conflicts.length === 0) return null
+  const nameFor = (c: Conflict) => games.find((g) => g.gameId === c.gameId)?.name ?? 'A tracked game'
+  return (
+    <PanelSection title="Save conflicts">
+      {conflicts.map((c) => (
+        <PanelSectionRow key={c.id}>
+          <ReadOnlyRow>
+            <div style={{ fontSize: '0.85em' }}><FaCodeBranch style={{ marginRight: '6px' }} /><b>{nameFor(c)}</b></div>
+            <div style={{ opacity: 0.75 }}>
+              This device and the cloud both changed since the last sync
+              {c.escalated ? ' — unresolved for a while' : ''}.
+            </div>
+          </ReadOnlyRow>
+        </PanelSectionRow>
+      ))}
+      {conflicts.map((c) => (
+        <PanelSectionRow key={`resolve-${c.id}`}>
+          <ButtonItem layout="below" onClick={() => onOpen(c.id)}>
+            Resolve {nameFor(c)}
           </ButtonItem>
         </PanelSectionRow>
       ))}
@@ -596,8 +638,11 @@ function Content() {
     }
   }, [])
 
+  const conflicts = useOpenConflicts()
+
   return (
     <>
+    <ConflictWarnings conflicts={conflicts} games={games} onOpen={openConflictResolveModal} />
     <LeaseWarnings warnings={state?.leaseWarnings ?? []} onDismiss={(g) => void dismiss(g)} />
     <Status state={state} version={version} />
     <Progress activity={activity} />
@@ -615,9 +660,12 @@ function Content() {
 
 export default definePlugin(() => {
   // Wired once, at plugin load, rather than from Content()'s mount — see registerGamingModeSync's
-  // own doc comment in gamingSync.tsx for why that timing matters.
+  // own doc comment in gamingSync.tsx for why that timing matters. registerConflictPolling shares
+  // that reasoning: a conflict found while no relevant page is open should still have the QAM badge
+  // lit and the library chip painted the moment one opens, not only once Content() itself mounts.
   registerGamingModeSync()
   registerLibraryOverlay()
+  registerConflictPolling()
   routerHook.addRoute(SAVELOCKER_PAGE_ROUTE, FullPage)
   return {
     name: 'SaveLocker',
@@ -625,13 +673,15 @@ export default definePlugin(() => {
     content: <Content />,
     icon: <FaGamepad />,
     onDismount() {
-      // The route, the library-page patch, and the Gaming Mode launch/close listeners are all owned
-      // by the plugin's own lifetime, not any one component's, so all three are torn down here rather
-      // than in a component's own cleanup — otherwise a plugin reload leaves the old listeners firing
-      // alongside the freshly-registered ones. (Content's own polling intervals are owned by its effect.)
+      // The route, the library-page patch, the Gaming Mode launch/close listeners, and the conflict
+      // poller are all owned by the plugin's own lifetime, not any one component's, so all four are
+      // torn down here rather than in a component's own cleanup — otherwise a plugin reload leaves
+      // the old listeners firing alongside the freshly-registered ones. (Content's own polling
+      // intervals are owned by its effect.)
       routerHook.removeRoute(SAVELOCKER_PAGE_ROUTE)
       unregisterLibraryOverlay()
       unregisterGamingModeSync()
+      unregisterConflictPolling()
     },
   }
 })

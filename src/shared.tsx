@@ -55,6 +55,10 @@ export interface AgentState {
   savesBacked: number
   lastSyncAgo: string
   leaseWarnings: LeaseWarning[]
+  /** This device's own machine id, once registered — null before then. Lets the conflict-policy
+   * dropdown offer "prefer THIS device" without a fleet-wide machine list (only the dashboard has
+   * one). */
+  machineId: string | null
 }
 
 /**
@@ -120,6 +124,68 @@ export interface ActivityDto {
 }
 
 export type AgentResult<T> = { ok: true; data: T } | { ok: false; reason: string }
+
+// ----- Conflicts (tasks/conflict-resolution-ui/plan.md Phase 10) -----
+//
+// Mirrors the shape `agent-ui/src/types.ts` generates from the agent's own OpenAPI document —
+// hand-written here because this plugin has no code-gen step of its own, but the field names and
+// casing (camelCase, System.Text.Json's default) must match `AgentApiServer.cs`'s local routes
+// exactly, the same contract agent-ui's `ConflictDto`/`SaveVersionDto`/`VersionStatsDto` types read.
+
+export type ConflictPolicyKind = 'Manual' | 'NewestWins' | 'PreferMachine'
+
+/** `versionAId` is always "the cloud" (the head this device diverged from), `versionBId` is always
+ * this device's own diverged push — the comparison is never device vs. device (plan.md decision 2). */
+export interface Conflict {
+  id: string
+  gameId: string
+  versionAId: string
+  versionBId: string
+  status: 'Open' | 'Resolved'
+  createdAt: string
+  resolvedVersionId: string | null
+  resolvedBy: string | null
+  resolvedAt: string | null
+  machineId: string | null
+  count: number
+  lastSeen: string | null
+  escalated: boolean
+}
+
+export interface SaveVersion {
+  id: string
+  gameId: string
+  machineId: string | null
+  machineName: string
+  createdAt: string
+  contentHash: string
+  size: number
+  parentVersionId: string | null
+  protected: boolean
+}
+
+export interface VersionStats {
+  fileCount: number
+  newestFileWriteUtc: string | null
+}
+
+export interface ConflictPolicySetting {
+  policy: ConflictPolicyKind
+  preferredMachineId: string | null
+}
+
+export const fetchConflicts = callable<[], AgentResult<Conflict[]>>('conflicts')
+export const fetchConflict = callable<[string], AgentResult<Conflict>>('conflict')
+/** `winningVersionId` is one of the conflict's own `versionAId`/`versionBId` — the caller already
+ * knows which side is "this device"'s. */
+export const resolveConflict =
+  callable<[string, string, boolean], AgentResult<null>>('resolve_conflict')
+export const fetchConflictPolicy =
+  callable<[string], AgentResult<ConflictPolicySetting>>('conflict_policy')
+export const setConflictPolicy =
+  callable<[string, ConflictPolicyKind, string | null], AgentResult<null>>('set_conflict_policy')
+export const fetchSaveVersion = callable<[string], AgentResult<SaveVersion>>('save_version')
+export const fetchVersionStats = callable<[string], AgentResult<VersionStats>>('version_stats')
 
 export const fetchRows = callable<[], AgentResult<Row[]>>('rows')
 export const resolveOptions =

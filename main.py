@@ -398,6 +398,42 @@ class Plugin:
             {"steamAppId": steam_app_id, "applied": applied, "error": error},
         )
 
+    async def conflicts(self):
+        """Every open conflict this machine is a party to (never a bystander case)."""
+        return _request("/api/conflicts")
+
+    async def conflict(self, conflict_id: str):
+        return _request("/api/conflicts/%s" % conflict_id)
+
+    async def resolve_conflict(self, conflict_id: str, winning_version_id: str, keep_both: bool):
+        """
+        The caller names the WINNING version, not a side — it already has the conflict's
+        `versionAId`/`versionBId` from `conflicts()`/`conflict()` and knows which one is "this
+        device"'s. `keep_both` protects the loser as a downloadable backup instead of leaving it to
+        eventual retention pruning.
+        """
+        return _request(
+            "/api/conflicts/%s/resolve" % conflict_id,
+            {"winningVersionId": winning_version_id, "keepBoth": keep_both},
+        )
+
+    async def conflict_policy(self, game_id: str):
+        return _request("/api/games/%s/conflict-policy" % game_id)
+
+    async def set_conflict_policy(self, game_id: str, policy: str, preferred_machine_id: str | None):
+        return _request(
+            "/api/games/%s/conflict-policy" % game_id,
+            {"policy": policy, "preferredMachineId": preferred_machine_id},
+        )
+
+    async def save_version(self, version_id: str):
+        """Machine/timestamp/size for one side of a conflict — a conflict only carries version ids."""
+        return _request("/api/versions/%s" % version_id)
+
+    async def version_stats(self, version_id: str):
+        """File count and newest-file-write time for one side of a conflict, read from its archive."""
+        return _request("/api/versions/%s/stats" % version_id)
+
     async def _main(self):
         decky.logger.info("SaveLocker plugin loaded; agent state dir: %s", _state_dir())
 

@@ -143,6 +143,15 @@ async function resolveMatch(appId: number): Promise<GamingSyncGame | null> {
   return resolveMatchSync(appId)
 }
 
+/** The reverse of `resolveMatchSync`: which Steam AppID (if any) a tracked game's own gameId maps
+ * to, for `conflicts.tsx` to know which library page's status chip a conflict belongs on. Reuses
+ * this same warm cache rather than a second one — a conflict without a resolvable AppID (the game
+ * has never been seen by `rows()`, e.g. no Steam launch has happened yet) has no library page chip
+ * to update anyway, so `null` here is a correct "nothing to do," not a failure. */
+export function gameIdToAppId(gameId: string): number | null {
+  return syncCache?.rows.find((r) => r.gameId === gameId)?.steamAppId ?? null
+}
+
 /**
  * `resolveMatchSync`, but willing to pay for one fresh round trip when the cache might be stale —
  * used by the library overlay's page-open check (`libraryOverlay.tsx`'s `OverlayHost`) so a game

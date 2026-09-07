@@ -6,6 +6,7 @@ import {
   reportSyncOutcome, resolveMatchFresh, resolveMatchSync, resolvePullEnabled,
   resolveSyncOnOpenEnabled, runPull, runSyncForGaming,
 } from './gamingSync'
+import { openConflictResolveModal, useOpenConflicts } from './conflicts'
 import { saveLockerToast, KIND_STYLE } from './toast'
 import {
   classifySyncOutput, markPageOpenPull, setChip, shouldRepullOnOpen, useSyncChip,
@@ -55,8 +56,10 @@ function ageSuffix(at: number): string {
 }
 
 /** The status/progress pill beside the buttons — same colored-circle language as `saveLockerToast`,
- * via the shared `KIND_STYLE` map, so the chip and the toast for the same event never disagree. */
-function SyncChip({ state }: { state: ChipState | null }) {
+ * via the shared `KIND_STYLE` map, so the chip and the toast for the same event never disagree.
+ * Clickable only in its 'conflict' state, straight into the resolve popup — every other state is
+ * read-only status, not an action. */
+function SyncChip({ state, onClick }: { state: ChipState | null; onClick?: () => void }) {
   // Re-renders on a slow tick purely so the relative age above stays honest on a page left open.
   const [, tick] = useState(0)
   useEffect(() => {
@@ -67,13 +70,16 @@ function SyncChip({ state }: { state: ChipState | null }) {
   if (!state) return null
   const { bg, fg, Icon } = KIND_STYLE[state.kind]
   const syncing = state.kind === 'syncing'
+  const clickable = state.kind === 'conflict' && onClick !== undefined
   return (
     <div
       title={state.reason}
+      onClick={clickable ? onClick : undefined}
       style={{
         display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0,
         background: bg, color: fg, borderRadius: '14px',
         padding: '6px 12px', fontSize: '13px', whiteSpace: 'nowrap',
+        cursor: clickable ? 'pointer' : 'default',
       }}
     >
       <Icon style={{ fontSize: '12px' }} />
@@ -104,6 +110,12 @@ function OverlayButtons({ appId, gameName }: { appId: number; gameName: string }
   // push had both just run. `useSyncChip` also subscribes, so a pull started from the Play button
   // (in `gamingSync.tsx`, which has no UI) updates this chip live.
   const chip = useSyncChip(appId)
+  // Which open conflict (if any) belongs to THIS game's own chip — `conflicts.tsx`'s chip-merge
+  // already painted the chip 'conflict' by gameId -> appId, so the reverse lookup here just needs
+  // this game's own id, which `resolveMatchSync` (synchronous, already-warm cache) already has.
+  const conflicts = useOpenConflicts()
+  const gameId = resolveMatchSync(appId)?.gameId
+  const conflict = gameId ? conflicts.find((c) => c.gameId === gameId) : undefined
 
   // Polls `activity()` while a pull/push this component started is in flight, so the chip can show a
   // live percentage — only ever available for a push (the agent only reports byte progress on the
@@ -256,7 +268,7 @@ function OverlayButtons({ appId, gameName }: { appId: number; gameName: string }
         gap: '8px',
       }}
     >
-      <SyncChip state={chip} />
+      <SyncChip state={chip} onClick={conflict ? () => openConflictResolveModal(conflict.id) : undefined} />
       {icon('pull', FaCloudDownloadAlt, 'Pull save')}
       {icon('push', FaCloudUploadAlt, 'Push save')}
       {icon('sync', FaSyncAlt, 'Sync save')}

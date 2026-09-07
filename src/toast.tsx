@@ -1,5 +1,7 @@
 import { toaster } from '@decky/api'
-import { FaCheckCircle, FaExclamationTriangle, FaInfoCircle, FaLock, FaSyncAlt, FaTimesCircle } from 'react-icons/fa'
+import {
+  FaCheckCircle, FaCodeBranch, FaExclamationTriangle, FaInfoCircle, FaLock, FaSyncAlt, FaTimesCircle,
+} from 'react-icons/fa'
 
 /**
  * One styled toast helper shared by `gamingSync.tsx` and `libraryOverlay.tsx`, so every SaveLocker
@@ -11,7 +13,7 @@ import { FaCheckCircle, FaExclamationTriangle, FaInfoCircle, FaLock, FaSyncAlt, 
  * shows `title`/`body`/`subtext` (those are definitely just text), so this degrades safely either way.
  */
 
-export type ToastKind = 'syncing' | 'success' | 'blocked' | 'error' | 'warning' | 'info'
+export type ToastKind = 'syncing' | 'success' | 'blocked' | 'error' | 'warning' | 'info' | 'conflict'
 
 /** Exported so `libraryOverlay.tsx`'s status chip can share these exact colors — the chip is meant
  * to read as the same status language as the toasts, not a second palette that happens to be close. */
@@ -22,6 +24,10 @@ export const KIND_STYLE: Record<ToastKind, { bg: string; fg: string; Icon: typeo
   error: { bg: '#3a1e1e', fg: '#e07272', Icon: FaTimesCircle },
   warning: { bg: '#2f2440', fg: '#b596e6', Icon: FaExclamationTriangle },
   info: { bg: '#26292c', fg: '#9a9a96', Icon: FaInfoCircle },
+  // Visually distinct from 'blocked's amber lock — a conflict is a known, structured fact (both
+  // sides genuinely diverged and need a choice), not a refusal. FaCodeBranch reads as "diverged"
+  // the same way the dashboard/agent-ui's GitBranch icon does for the same concept.
+  conflict: { bg: '#3a1a2e', fg: '#e0578f', Icon: FaCodeBranch },
 }
 
 function kindLogo(kind: ToastKind) {

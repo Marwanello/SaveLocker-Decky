@@ -1,15 +1,25 @@
 import { useEffect, useState } from 'react'
 import {
-  DialogButton, Focusable, PanelSection, PanelSectionRow, Tabs, TextField, ToggleField,
+  DialogButton, DropdownItem, Focusable, PanelSection, PanelSectionRow, Tabs, TextField, ToggleField,
 } from '@decky/ui'
 import { callable } from '@decky/api'
 import {
   ReadOnlyRow, applyAll, shortState, summarise, timeAgo,
-  fetchGames, fetchState, fetchVersion, fetchActivity, fetchPluginVersion, runDoctor, runSync,
+  fetchConflictPolicy, fetchGames, fetchState, fetchVersion, fetchActivity, fetchPluginVersion,
+  runDoctor, runSync, setConflictPolicy,
   type ActivityDto, type ActivityLogEntry, type AgentResult, type AgentState, type AgentVersion,
-  type DoctorResult, type Outcome, type TrackedGame,
+  type ConflictPolicyKind, type ConflictPolicySetting, type DoctorResult, type Outcome, type TrackedGame,
 } from './shared'
 import { persistSyncOnOpen, resolvePullEnabled } from './gamingSync'
+
+/** The three values verbatim (`ConflictPolicy` in `src/Shared/Contracts.cs`) — "Prefer this device"
+ * rather than a full machine picker, since a Decky settings row has no fleet-wide machine list to
+ * choose from (only the dashboard does); it always targets THIS device's own machine id. */
+const CONFLICT_POLICY_OPTIONS: { data: ConflictPolicyKind; label: string }[] = [
+  { data: 'Manual', label: 'Ask me every time' },
+  { data: 'NewestWins', label: 'Newest save always wins' },
+  { data: 'PreferMachine', label: 'Prefer this device' },
+]
 
 /**
  * The full-screen SaveLocker page — everything that was crowding the Quick Access panel (per-game
@@ -29,9 +39,11 @@ const fetchSyncOnOpenOverrides = callable<[], Record<string, boolean>>('gaming_s
  * own name, same as the old QAM picker did), and the pull-before-launch toggle — all inline, no
  * dropdown, so there's nothing here that depends on the QAM's own dropdown-remounts-the-panel quirk.
  */
-function GameRow({ game, syncOnOpenEnabled, onChanged, onSyncOnOpenChanged }: {
+function GameRow({ game, syncOnOpenEnabled, machineId, onChanged, onSyncOnOpenChanged }: {
   game: TrackedGame
   syncOnOpenEnabled: boolean
+  /** This device's own machine id (from `/api/state`), or null before this device has registered. */
+  machineId: string | null
   onChanged: () => void
   onSyncOnOpenChanged: (gameId: string, value: boolean) => void
 }) {
@@ -40,6 +52,23 @@ function GameRow({ game, syncOnOpenEnabled, onChanged, onSyncOnOpenChanged }: {
   const [busy, setBusy] = useState(false)
   const [pullBusy, setPullBusy] = useState(false)
   const [syncOnOpenBusy, setSyncOnOpenBusy] = useState(false)
+  const [policy, setPolicy] = useState<ConflictPolicySetting | null>(null)
+  const [policyBusy, setPolicyBusy] = useState(false)
+
+  useEffect(() => {
+    void fetchConflictPolicy(game.gameId).then((r) => { if (r.ok) setPolicy(r.data) })
+  }, [game.gameId])
+
+  const changePolicy = async (next: ConflictPolicyKind) => {
+    setPolicyBusy(true)
+    try {
+      const preferredMachineId = next === 'PreferMachine' ? machineId : null
+      const r = await setConflictPolicy(game.gameId, next, preferredMachineId)
+      if (r.ok) setPolicy({ policy: next, preferredMachineId })
+    } finally {
+      setPolicyBusy(false)
+    }
+  }
 
   const effective = game.alias ?? game.name
   const pullEnabled = resolvePullEnabled(game)
@@ -183,6 +212,29 @@ function GameRow({ game, syncOnOpenEnabled, onChanged, onSyncOnOpenChanged }: {
           </DialogButton>
         </Focusable>
       )}
+      {!editing && (
+        <Focusable style={{ marginTop: '6px', maxWidth: '280px' }}>
+          <DropdownItem
+            label="If a save conflict happens"
+            rgOptions={CONFLICT_POLICY_OPTIONS}
+            selectedOption={policy?.policy ?? 'Manual'}
+            disabled={policyBusy}
+            onChange={(o: any) => {
+              const picked = o && typeof o === 'object' && 'data' in o ? o.data : o
+              void changePolicy(picked as ConflictPolicyKind)
+            }}
+          />
+          {/* This device can only ever set "prefer THIS device" (there is no fleet-wide machine
+              picker here) — if the dashboard or another device already set a DIFFERENT preferred
+              machine, say so rather than silently implying this dropdown already reflects that. */}
+          {policy?.policy === 'PreferMachine' && policy.preferredMachineId
+            && machineId !== null && policy.preferredMachineId !== machineId && (
+            <div style={{ fontSize: '10px', opacity: 0.6, marginTop: '2px' }}>
+              Currently prefers a different device — set from the dashboard.
+            </div>
+          )}
+        </Focusable>
+      )}
     </Focusable>
   )
 }
@@ -290,6 +342,7 @@ function OverviewTab() {
             key={g.gameId}
             game={g}
             syncOnOpenEnabled={syncOnOpenOverrides[g.gameId] ?? true}
+            machineId={state?.machineId ?? null}
             onChanged={() => void refresh()}
             onSyncOnOpenChanged={(gameId, value) => {
               // Optimistic, same reasoning as togglePull's onChanged(): don't wait out the next
