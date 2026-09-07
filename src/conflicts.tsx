@@ -150,6 +150,16 @@ interface Side {
   stats?: VersionStats
 }
 
+/** What the popup closed with, for `gamingSync.tsx`'s launch gate to act on:
+ *  - `resolved` — a side was chosen; the conflict is gone server-side.
+ *  - `playAnyway` — the player chose to launch without resolving (only offered when `showPlayAnyway`
+ *    is set); the conflict is still open server-side.
+ *  - `cancelled` — backed out via B/backdrop dismiss without choosing either. "(B) Decide later —
+ *    don't launch yet" in the plan's own mockup means exactly that.
+ * `resolved` and `playAnyway` both mean "go ahead and launch now"; only `cancelled` means stay
+ * blocked — see both call sites' `if (outcome !== 'cancelled')` checks. */
+export type ConflictModalOutcome = 'resolved' | 'playAnyway' | 'cancelled'
+
 /**
  * Big Picture-styled resolve popup — `Focusable` cards, D-pad left/right between them, A (via
  * `DialogButton`/`onActivate`) to pick a side, B backs out via `ModalRoot`'s own cancel handling
@@ -163,17 +173,20 @@ interface Side {
  * than a separate confirm step — this is a "decide now so the game/session can move on" surface, not
  * a page to review at leisure the way `agent-ui`'s own Conflicts list is.
  *
- * `onClosed` (Phase 11) fires exactly once, on unmount, with whether this closed because the
- * conflict was actually resolved (`done`) or the player backed out via B/backdrop dismiss without
- * choosing a side. `gamingSync.tsx`'s launch gate uses it to decide whether to relaunch the game it
- * cancelled — "(B) Decide later — don't launch yet" in the plan's own mockup means exactly that: no
- * relaunch, stay blocked. A ref (not `done` captured directly) because the unmount cleanup below
- * runs once, reading whatever `done` was LAST set to, not whatever it was when the effect was set up.
+ * `showPlayAnyway` (Bug 1 fix) adds a third option beside the two "Keep X" cards: launch right now
+ * without resolving anything, leaving the conflict open. Only meaningful when this popup was raised
+ * by pressing Play with a launch still cancelled and waiting on this decision — a page-open or
+ * already-running-game trigger has no pending launch to proceed with, so those callers omit it.
+ *
+ * `onClosed` (Phase 11) fires exactly once, on unmount, with the outcome above. A ref (not state
+ * captured directly) because the unmount cleanup below runs once, reading whatever the ref was LAST
+ * set to at the moment of the action, not whatever it was when the effect was set up.
  */
-function ConflictResolveModal({ conflict, closeModal, onClosed }: {
+function ConflictResolveModal({ conflict, closeModal, onClosed, showPlayAnyway }: {
   conflict: Conflict
   closeModal?: () => void
-  onClosed?: (resolved: boolean) => void
+  onClosed?: (outcome: ConflictModalOutcome) => void
+  showPlayAnyway?: boolean
 }) {
   const [gameName, setGameName] = useState(conflict.gameId)
   const [versionA, setVersionA] = useState<SaveVersion | undefined>()
@@ -183,9 +196,8 @@ function ConflictResolveModal({ conflict, closeModal, onClosed }: {
   const [keepBoth, setKeepBoth] = useState(false)
   const [resolving, setResolving] = useState(false)
   const [done, setDone] = useState(false)
-  const doneRef = useRef(false)
-  useEffect(() => { doneRef.current = done }, [done])
-  useEffect(() => () => onClosed?.(doneRef.current), [])
+  const outcomeRef = useRef<ConflictModalOutcome>('cancelled')
+  useEffect(() => () => onClosed?.(outcomeRef.current), [])
 
   useEffect(() => {
     void fetchGames().then((r) => {
@@ -205,6 +217,7 @@ function ConflictResolveModal({ conflict, closeModal, onClosed }: {
     try {
       const r = await resolveConflict(conflict.id, winningVersionId, keepBoth)
       if (r.ok) {
+        outcomeRef.current = 'resolved'
         setDone(true)
         saveLockerToast('success', `${gameName} — conflict resolved`)
         refreshConflictsSoon()
@@ -215,6 +228,14 @@ function ConflictResolveModal({ conflict, closeModal, onClosed }: {
     } finally {
       setResolving(false)
     }
+  }
+
+  // No server call — the conflict stays open. Sets the outcome ref directly and closes; the unmount
+  // cleanup above reads whatever the ref was last set to, same as `resolve` does on success.
+  const playAnyway = () => {
+    if (resolving || done) return
+    outcomeRef.current = 'playAnyway'
+    closeModal?.()
   }
 
   if (done) {
@@ -318,6 +339,17 @@ function ConflictResolveModal({ conflict, closeModal, onClosed }: {
             onChange={setKeepBoth}
           />
         </div>
+
+        {showPlayAnyway && (
+          <div style={{ marginTop: '14px', borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: '14px' }}>
+            <DialogButton disabled={resolving} onClick={playAnyway} style={{ width: '100%', padding: '8px' }}>
+              Play Anyway
+            </DialogButton>
+            <div style={{ fontSize: '10.5px', opacity: 0.55, marginTop: '6px', textAlign: 'center' }}>
+              Launches with this device's current save, unresolved — you can pick a side later.
+            </div>
+          </div>
+        )}
       </div>
     </ModalRoot>
   )
@@ -334,15 +366,20 @@ function ConflictResolveModal({ conflict, closeModal, onClosed }: {
  */
 export function openConflictResolveModal(
   conflictId: string,
-  opts: { onClosed?: (resolved: boolean) => void } = {},
+  opts: { onClosed?: (outcome: ConflictModalOutcome) => void; showPlayAnyway?: boolean } = {},
 ): void {
   const cached = openConflicts.find((c) => c.id === conflictId)
   if (cached) {
-    showModal(<ConflictResolveModal conflict={cached} onClosed={opts.onClosed} />)
+    showModal(
+      <ConflictResolveModal conflict={cached} onClosed={opts.onClosed} showPlayAnyway={opts.showPlayAnyway} />,
+    )
     return
   }
   void fetchConflict(conflictId).then((r) => {
-    if (r.ok) showModal(<ConflictResolveModal conflict={r.data} onClosed={opts.onClosed} />)
-    else opts.onClosed?.(false)
+    if (r.ok) {
+      showModal(
+        <ConflictResolveModal conflict={r.data} onClosed={opts.onClosed} showPlayAnyway={opts.showPlayAnyway} />,
+      )
+    } else opts.onClosed?.('cancelled')
   })
 }

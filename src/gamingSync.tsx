@@ -80,7 +80,10 @@ const preLaunchSync = callable<[string], Result<PreLaunchSyncResult>>('pre_launc
  */
 interface ConflictHooks {
   getOpenConflictForGame: (gameId: string) => { id: string } | null
-  openConflictResolveModal: (conflictId: string, opts?: { onClosed?: (resolved: boolean) => void }) => void
+  openConflictResolveModal: (
+    conflictId: string,
+    opts?: { onClosed?: (outcome: 'resolved' | 'playAnyway' | 'cancelled') => void; showPlayAnyway?: boolean },
+  ) => void
 }
 let conflictHooks: ConflictHooks | null = null
 export function setConflictHooks(hooks: ConflictHooks): void { conflictHooks = hooks }
@@ -326,8 +329,11 @@ function handlePreLaunchResult(
     setChip(appId, { kind: 'conflict', text: 'Conflict', pct: null, at: Date.now() })
     if (conflictId) {
       saveLockerToast('blocked', `${match.name} — save conflict`, 'Resolve it to launch')
+      // showPlayAnyway: true — the launch is still cancelled and waiting on this popup, so "launch
+      // anyway, unresolved" is a real option here, unlike the page-open/already-running triggers.
       conflictHooks?.openConflictResolveModal(conflictId, {
-        onClosed: (resolved) => { if (resolved) relaunch(appId, appIdStr, launchSource, match.name) },
+        showPlayAnyway: true,
+        onClosed: (outcome) => { if (outcome !== 'cancelled') relaunch(appId, appIdStr, launchSource, match.name) },
       })
     } else {
       // Defensive only — the agent always sets ConflictId alongside Blocked. Nothing to open, so
@@ -427,7 +433,8 @@ async function handleGameActionStart(
     preLaunchHandled.add(appId)
     setChip(appId, { kind: 'conflict', text: 'Conflict', pct: null, at: Date.now() })
     conflictHooks?.openConflictResolveModal(knownConflict.id, {
-      onClosed: (resolved) => { if (resolved) relaunch(appId, appIdStr, launchSource, match.name) },
+      showPlayAnyway: true,
+      onClosed: (outcome) => { if (outcome !== 'cancelled') relaunch(appId, appIdStr, launchSource, match.name) },
     })
     return
   }
@@ -515,13 +522,14 @@ async function handleLifetimeChange(data: SaveLockerAppLifetimeNotification): Pr
 
     // The game is ALREADY RUNNING by the time this fallback fires (RegisterForGameActionStart never
     // saw this launch) — there is no launch left to cancel or block here, only to check and report.
-    // A known conflict still paints the chip 'conflict' (clickable — same popup libraryOverlay.tsx's
-    // chip already opens) rather than trying to gate anything that has already started.
+    // A known conflict still opens the same resolve popup the fast path would have (no
+    // `showPlayAnyway`: the game is already running, so there is no pending launch to proceed with —
+    // resolving here just settles the conflict for next time).
     const syncOnOpen = resolveSyncOnOpenEnabled(match.gameId)
     const knownConflict = conflictHooks?.getOpenConflictForGame(match.gameId) ?? null
     if (knownConflict) {
       setChip(data.unAppID, { kind: 'conflict', text: 'Conflict', pct: null, at: Date.now() })
-      if (!syncOnOpen) saveLockerToast('blocked', `${match.name} — save conflict`, 'Resolve it in the plugin')
+      conflictHooks?.openConflictResolveModal(knownConflict.id)
       return
     }
 
@@ -544,7 +552,10 @@ async function handleLifetimeChange(data: SaveLockerAppLifetimeNotification): Pr
     }
     if (r.data.decision === 'Blocked') {
       setChip(data.unAppID, { kind: 'conflict', text: 'Conflict', pct: null, at: Date.now() })
-      if (!syncOnOpen) saveLockerToast('blocked', `${match.name} — save conflict`, 'Resolve it in the plugin')
+      // Same reasoning as the knownConflict branch above: the game is already running, so this just
+      // surfaces the resolve popup, no showPlayAnyway and nothing to relaunch afterward.
+      if (r.data.conflictId) conflictHooks?.openConflictResolveModal(r.data.conflictId)
+      else saveLockerToast('blocked', `${match.name} — save conflict`, 'Resolve it in the plugin')
       return
     }
     const paused = r.data.decision === 'ProceedSyncPaused'

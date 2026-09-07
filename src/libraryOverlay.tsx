@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { afterPatch, appDetailsClasses, createReactTreePatcher, findInReactTree, Focusable } from '@decky/ui'
 import { routerHook } from '@decky/api'
 import { FaCloudDownloadAlt, FaCloudUploadAlt, FaSyncAlt } from 'react-icons/fa'
@@ -116,6 +116,27 @@ function OverlayButtons({ appId, gameName }: { appId: number; gameName: string }
   const conflicts = useOpenConflicts()
   const gameId = resolveMatchSync(appId)?.gameId
   const conflict = gameId ? conflicts.find((c) => c.gameId === gameId) : undefined
+
+  /**
+   * Bug 1, point 5: if a conflict already exists when this page opens, surface the resolve popup
+   * right away rather than leaving it to a clickable chip the user might not notice. Gated on the
+   * SAME two settings as the page-open pull effect below it (pull-before-launch AND sync-on-open both
+   * on) — that pairing is what makes this page responsible for checking sync state on open at all;
+   * with either off, the existing clickable 'conflict' chip is the only affordance, matching Bug 1's
+   * settings matrix.
+   *
+   * `openedRef` guards against reopening on every 20s poll tick while the same conflict stays open
+   * and this page stays mounted — it should offer the popup once per page visit, not fight the user
+   * for attention every time `conflicts.tsx`'s poller re-fires with the same still-open conflict.
+   */
+  const openedRef = useRef(false)
+  useEffect(() => {
+    if (openedRef.current || !conflict) return
+    const match = resolveMatchSync(appId)
+    if (!match || !resolvePullEnabled(match) || !resolveSyncOnOpenEnabled(match.gameId)) return
+    openedRef.current = true
+    openConflictResolveModal(conflict.id)
+  }, [appId, conflict])
 
   // Polls `activity()` while a pull/push this component started is in flight, so the chip can show a
   // live percentage — only ever available for a push (the agent only reports byte progress on the
