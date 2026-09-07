@@ -174,6 +174,15 @@ export interface ConflictPolicySetting {
   preferredMachineId: string | null
 }
 
+/** `GET /api/games/{id}/sync-status` (`SyncStatusDto` in `Contracts.cs`) — an on-demand, disk-cost
+ * "am I actually in sync right now" check (Phase 12). Never poll this; see `fetchSyncStatus`'s own
+ * call site in `fullPage.tsx` for the one place it's meant to be triggered from. */
+export interface SyncStatus {
+  inSync: boolean
+  hasOpenConflict: boolean
+  conflictId: string | null
+}
+
 export const fetchConflicts = callable<[], AgentResult<Conflict[]>>('conflicts')
 export const fetchConflict = callable<[string], AgentResult<Conflict>>('conflict')
 /** `winningVersionId` is one of the conflict's own `versionAId`/`versionBId` — the caller already
@@ -186,6 +195,7 @@ export const setConflictPolicy =
   callable<[string, ConflictPolicyKind, string | null], AgentResult<null>>('set_conflict_policy')
 export const fetchSaveVersion = callable<[string], AgentResult<SaveVersion>>('save_version')
 export const fetchVersionStats = callable<[string], AgentResult<VersionStats>>('version_stats')
+export const fetchSyncStatus = callable<[string], AgentResult<SyncStatus>>('sync_status')
 
 export const fetchRows = callable<[], AgentResult<Row[]>>('rows')
 export const resolveOptions =

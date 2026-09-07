@@ -6,10 +6,12 @@ import { callable } from '@decky/api'
 import {
   ReadOnlyRow, applyAll, shortState, summarise, timeAgo,
   fetchConflictPolicy, fetchGames, fetchState, fetchVersion, fetchActivity, fetchPluginVersion,
-  runDoctor, runSync, setConflictPolicy,
+  fetchSyncStatus, runDoctor, runSync, setConflictPolicy,
   type ActivityDto, type ActivityLogEntry, type AgentResult, type AgentState, type AgentVersion,
-  type ConflictPolicyKind, type ConflictPolicySetting, type DoctorResult, type Outcome, type TrackedGame,
+  type ConflictPolicyKind, type ConflictPolicySetting, type DoctorResult, type Outcome,
+  type SyncStatus, type TrackedGame,
 } from './shared'
+import { openConflictResolveModal } from './conflicts'
 import { persistSyncOnOpen, resolvePullEnabled } from './gamingSync'
 
 /** The three values verbatim (`ConflictPolicy` in `src/Shared/Contracts.cs`) — "Prefer this device"
@@ -54,10 +56,28 @@ function GameRow({ game, syncOnOpenEnabled, machineId, onChanged, onSyncOnOpenCh
   const [syncOnOpenBusy, setSyncOnOpenBusy] = useState(false)
   const [policy, setPolicy] = useState<ConflictPolicySetting | null>(null)
   const [policyBusy, setPolicyBusy] = useState(false)
+  const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null)
+  const [syncStatusBusy, setSyncStatusBusy] = useState(false)
+  const [syncStatusError, setSyncStatusError] = useState<string | null>(null)
 
   useEffect(() => {
     void fetchConflictPolicy(game.gameId).then((r) => { if (r.ok) setPolicy(r.data) })
   }, [game.gameId])
+
+  // On demand only — plan.md Phase 12 is explicit that this must never run on a timer or a passive
+  // list refresh: the route hashes the whole save folder to answer, the same disk cost a push's own
+  // hash pays, so it only runs when this row's own button is pressed.
+  const checkSyncStatus = async () => {
+    setSyncStatusBusy(true)
+    setSyncStatusError(null)
+    try {
+      const r = await fetchSyncStatus(game.gameId)
+      if (r.ok) setSyncStatus(r.data)
+      else { setSyncStatus(null); setSyncStatusError(r.reason) }
+    } finally {
+      setSyncStatusBusy(false)
+    }
+  }
 
   const changePolicy = async (next: ConflictPolicyKind) => {
     setPolicyBusy(true)
@@ -232,6 +252,38 @@ function GameRow({ game, syncOnOpenEnabled, machineId, onChanged, onSyncOnOpenCh
             <div style={{ fontSize: '10px', opacity: 0.6, marginTop: '2px' }}>
               Currently prefers a different device — set from the dashboard.
             </div>
+          )}
+        </Focusable>
+      )}
+      {!editing && (
+        <Focusable style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '8px' }}>
+          <DialogButton
+            disabled={syncStatusBusy}
+            onClick={() => void checkSyncStatus()}
+            style={{ width: 'auto', minWidth: 0, padding: '8px 14px', flexShrink: 0 }}
+          >
+            {syncStatusBusy ? 'Checking…' : 'Check sync status'}
+          </DialogButton>
+          {syncStatusError && (
+            <span style={{ fontSize: '12px', opacity: 0.7 }}>
+              {syncStatusError === 'no-agent' ? 'SaveLocker is not installed on this device.'
+                : syncStatusError === 'unreachable' ? 'The SaveLocker agent is not running.'
+                  : `Could not check (${syncStatusError}).`}
+            </span>
+          )}
+          {syncStatus && !syncStatusError && (
+            syncStatus.hasOpenConflict && syncStatus.conflictId ? (
+              <DialogButton
+                onClick={() => openConflictResolveModal(syncStatus.conflictId!)}
+                style={{ width: 'auto', minWidth: 0, padding: '8px 14px', flexShrink: 0 }}
+              >
+                Open conflict — resolve
+              </DialogButton>
+            ) : (
+              <span style={{ fontSize: '12px', opacity: 0.8 }}>
+                {syncStatus.inSync ? 'In sync with the cloud.' : 'Out of sync with the cloud.'}
+              </span>
+            )
           )}
         </Focusable>
       )}

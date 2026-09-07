@@ -474,6 +474,19 @@ class Plugin:
         """
         return _request("/api/games/%s/pre-launch-sync" % game_id, {}, timeout=600)
 
+    async def sync_status(self, game_id: str):
+        """
+        On-demand "am I actually in sync right now" check (Phase 12 of
+        tasks/conflict-resolution-ui/plan.md) — `fullPage.tsx`'s "Check sync" button only, never a
+        poll. The route hashes the whole save folder to answer, the same disk cost a push's own hash
+        pays, so it must stay a one-shot, user-triggered call.
+
+        A longer-than-default timeout for the same reason `sync()` above needs one: hashing a large
+        save folder over local disk is usually fast but not bounded, and this should wait it out
+        rather than report a false timeout.
+        """
+        return _request("/api/games/%s/sync-status" % game_id, timeout=60)
+
     async def _main(self):
         decky.logger.info("SaveLocker plugin loaded; agent state dir: %s", _state_dir())
 
