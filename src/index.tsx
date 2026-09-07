@@ -9,8 +9,8 @@ import { GamingSyncSettings, registerGamingModeSync, setConflictHooks, unregiste
 import { classifySyncOutput } from './syncStatus'
 import { registerLibraryOverlay, unregisterLibraryOverlay } from './libraryOverlay'
 import {
-  getOpenConflictForGame, openConflictResolveModal, registerConflictPolling, unregisterConflictPolling,
-  useOpenConflicts,
+  getOpenConflictForGame, openConflictResolveModal, registerConflictPolling,
+  unregisterConflictPolling, useOpenConflicts,
 } from './conflicts'
 import { FullPage, SAVELOCKER_PAGE_ROUTE } from './fullPage'
 import {

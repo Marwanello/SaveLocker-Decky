@@ -448,6 +448,25 @@ function handlePreLaunchResult(
  * plugin delaying a launch is acceptable, this plugin ever silently stranding one on a cancelled
  * action without retrying is not.
  */
+/**
+ * `RegisterForGameActionStart`'s `appId` string is a plain small decimal AppID for a genuine
+ * Steam-library game, but for a non-Steam shortcut it's instead Steam's full 64-bit `CGameID`: the
+ * real AppID packed into the upper 32 bits, with a shortcut/type marker in the low 32 (confirmed on
+ * hardware via a CDP console trace — Steam's own debug log showed appId "13278285201168924672" for a
+ * shortcut launch, whose upper 32 bits, 0xb845f20a, are exactly that game's real AppID, 3091591690,
+ * as reported everywhere else: `bRunning`'s `unAppID`, `GetAppOverviewByAppID`, etc). `Number()` on
+ * the packed form silently rounds to a garbage 53-bit float matching nothing in `resolveMatchSync`'s
+ * cache — which is why every non-Steam-shortcut launch (Heroic, emulators, this file's whole reason
+ * to exist) was invisible to this fast path: `resolveMatchSync` always came back null, so cancel,
+ * pause, and Play Anyway never ran at all, silently falling through to the slower `bRunning` fallback
+ * in `handleLifetimeChange`, which has no pending launch left to act on by the time it fires.
+ */
+function parseGameActionAppId(appIdStr: string): number | null {
+  if (!/^\d+$/.test(appIdStr)) return null
+  const big = BigInt(appIdStr)
+  return Number(big > 0xFFFFFFFFn ? big >> 32n : big)
+}
+
 async function handleGameActionStart(
   gameActionId: number,
   appIdStr: string,
@@ -455,8 +474,8 @@ async function handleGameActionStart(
   launchSource: number,
 ): Promise<void> {
   if (action !== 'LaunchApp') return
-  const appId = Number(appIdStr)
-  if (Number.isNaN(appId)) return
+  const appId = parseGameActionAppId(appIdStr)
+  if (appId === null) return
   if (selfRelaunching.delete(appId)) return // our own RunGame call below — let Steam run it untouched
   if (!gamingSyncEnabled) return
   if (interceptedLaunches.has(appId)) {
@@ -490,12 +509,6 @@ async function handleGameActionStart(
     interceptedLaunches.add(appId)
     try {
       SteamClient.Apps.CancelGameAction(gameActionId)
-      const active = await SteamClient.Apps.GetActiveGameActions()
-      if (active.some((a) => a.nGameActionID === gameActionId)) {
-        interceptedLaunches.delete(appId)
-        setChip(appId, { kind: 'conflict', text: 'Conflict', pct: null, at: Date.now() })
-        return // lost the race; let Steam's own launch continue untouched
-      }
     } catch {
       interceptedLaunches.delete(appId)
       setChip(appId, { kind: 'conflict', text: 'Conflict', pct: null, at: Date.now() })
@@ -503,9 +516,14 @@ async function handleGameActionStart(
     }
     interceptedLaunches.delete(appId)
     preLaunchHandled.add(appId)
-    // GetActiveGameActions coming back empty above means the action is gone, not necessarily that
-    // CancelGameAction is WHY — see pendingBlock's own doc comment for why this is only believed
-    // cancelled, not confirmed, and needs the bRunning fallback below as a safety net.
+    // Deliberately not verified against GetActiveGameActions() — confirmed on hardware (CDP console
+    // trace) that its answer is unreliable in BOTH directions: empty doesn't prove the cancel worked
+    // (the pipeline may have simply already progressed past it), and non-empty doesn't prove it
+    // failed either (Steam can be slow to prune the entry even once the cancel has taken effect) — an
+    // earlier version of this code bailed out here on "still present," which meant a real, working
+    // cancel got no popup at all. So this always proceeds to open it; if the cancel silently failed
+    // anyway, the game genuinely starts running and `handleLifetimeChange`'s `bRunning` check is the
+    // actual authority that catches it — see `pendingBlock`'s own doc comment for that safety net.
     pendingBlock.add(appId)
     setChip(appId, { kind: 'conflict', text: 'Conflict', pct: null, at: Date.now() })
     conflictHooks?.openConflictResolveModal(knownConflict.id, {
@@ -539,20 +557,11 @@ async function handleGameActionStart(
   interceptedLaunches.add(appId)
   try {
     SteamClient.Apps.CancelGameAction(gameActionId)
-    // Confirm the cancel actually took rather than assume it: if this action is still active a
-    // moment later, cancelling lost the race (the pipeline had already moved past a cancellable
-    // state) — back off and let Steam's own launch carry on untouched. Proceeding anyway risks
-    // calling `RunGame` on top of a launch that is still going, i.e. starting the game twice.
-    const active = await SteamClient.Apps.GetActiveGameActions()
-    if (active.some((a) => a.nGameActionID === gameActionId)) {
-      interceptedLaunches.delete(appId)
-      // Pressing Start deserves a reaction every time, not just on the path that wins the race —
-      // silence here reads as "did this even see me press Play?". Routed to the chip instead of a
-      // toast when the page's own chip is the reporting surface (see `handlePreLaunchResult`'s `quiet`).
-      setChip(appId, { kind: 'blocked', text: 'Launched unsynced', pct: null, at: Date.now() })
-      if (!syncOnOpen) saveLockerToast('blocked', `Pre-launch check blocked for ${match.name}`, 'Launching without it')
-      return
-    }
+    // Not verified against GetActiveGameActions() — see the knownConflict branch above's comment:
+    // confirmed on hardware that its answer proves nothing reliable in either direction, so this
+    // always proceeds to the pre-launch sync check below rather than backing off on a false "still
+    // active" read. `handlePreLaunchResult`'s own `pendingBlock` + `handleLifetimeChange`'s `bRunning`
+    // check are what actually catch a cancel that silently failed.
   } catch {
     interceptedLaunches.delete(appId)
     setChip(appId, { kind: 'blocked', text: 'Launched unsynced', pct: null, at: Date.now() })
