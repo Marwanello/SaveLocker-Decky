@@ -69,6 +69,28 @@ def _request(path: str, payload=None):
         return {"ok": False, "reason": "bad-response"}
 
 
+def _normalize_game(game: dict) -> dict:
+    """
+    `/api/games`'s `TrackedGameDto` keeps `id`/`path` as its wire field names deliberately, for
+    back-compat with older plugin installs (see `AgentApiServer.cs`'s doc comment on that DTO) — every
+    other agent DTO this plugin consumes calls the same concept `gameId`, which is what every TS
+    caller here (`fullPage.tsx`'s `TrackedGame`, `gamingSync.tsx`'s `GamingSyncGame`) actually reads.
+    Remapped once, here, rather than in TS.
+
+    Before this fix `game.gameId` was `undefined` for every game this call returned, which broke far
+    more than the alias editor: `fullPage.tsx`'s `set_alias`/`set_pull_before_launch`/conflict-policy
+    routes all sent `undefined` as the game id and 404'd silently, AND `gamingSync.tsx`'s
+    `resolveMatchSync` could never resolve a match even on its PRIMARY (AppID) path — it looks up a
+    row's `gameId` against `syncCache.games`, which was always empty for that key — so the library
+    page's Pull/Push/Sync buttons and status chip never mounted for any game at all, regardless of
+    whether the AppID or name matched.
+    """
+    out = dict(game)
+    out["gameId"] = out.pop("id", None)
+    out["saveDirectory"] = out.pop("path", None)
+    return out
+
+
 def _clean_env() -> dict:
     """
     Our environment with Decky's own loader stripped back out of it.
@@ -281,7 +303,10 @@ class Plugin:
 
     async def games(self):
         """Every game this machine tracks — not just the ones Steam launches."""
-        return _request("/api/games")
+        result = _request("/api/games")
+        if result["ok"] and result["data"] is not None:
+            result["data"] = [_normalize_game(g) for g in result["data"]]
+        return result
 
     async def set_alias(self, game_id: str, alias: str | None):
         """
