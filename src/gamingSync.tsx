@@ -280,12 +280,28 @@ const interceptedLaunches = new Set<number>()
 // not a real new launch" — without this, calling `RunGame` from inside the handler would trigger
 // another GameActionStart for the same appId and cancel itself forever.
 const selfRelaunching = new Set<number>()
+// appId -> "a Blocked decision cancelled this launch and it must not be running" — the fallback for
+// when `SteamClient.Apps.CancelGameAction` (undocumented, best-effort — see steam.d.ts) did not
+// actually stop the process. Investigated for the "game still launches despite the conflict popup"
+// report: a non-Steam-shortcut launch (Heroic, emulators — this whole mechanism's reason to exist)
+// can apparently reach `CreatingProcess` almost immediately, skipping nearly every intermediate
+// `LaunchAppTask_t` stage a Steam-store game would pass through, leaving `CancelGameAction` too
+// little time to land even when called synchronously with no `await` ahead of it — genuinely
+// unreliable prevention, not a bug in how it's called. `handleLifetimeChange`'s `bRunning` check
+// below is the authoritative "is it actually running" signal `GetActiveGameActions` can't give
+// after the fact, so it is what triggers the kill. Cleared only by `relaunch` below — an approved
+// (re)launch, whether from resolving, "Play Anyway", or a non-Blocked decision — never by the kill
+// itself, so a launch that somehow slips through twice keeps getting killed until one is approved.
+const blockedLaunches = new Set<number>()
 
 /** Re-triggers a launch this handler previously cancelled — success, refusal, or exception alike,
  * matching this file's "delaying a launch is acceptable, stranding one is not" rule. Shared by the
  * Proceed/ProceedSyncPaused path below and the resolve popup's own `onClosed` callback: a launch
  * that was Blocked and then resolved needs the exact same relaunch as one that was never blocked. */
 function relaunch(appId: number, appIdStr: string, launchSource: number, gameName: string): void {
+  // This launch is now approved — clear the fallback-kill flag before RunGame, or the process it is
+  // about to (re)create would be killed on sight by handleLifetimeChange the moment it starts.
+  blockedLaunches.delete(appId)
   selfRelaunching.add(appId)
   try {
     SteamClient.Apps.RunGame(appIdStr, '', 0, launchSource)
@@ -326,6 +342,9 @@ function handlePreLaunchResult(
 
   const { decision, reason, conflictId, holderMachineName } = r.data
   if (decision === 'Blocked') {
+    // See blockedLaunches' own doc comment: the cancel this branch's caller already attempted is
+    // best-effort and can lose the race, so this is believed-cancelled, not confirmed-cancelled.
+    blockedLaunches.add(appId)
     setChip(appId, { kind: 'conflict', text: 'Conflict', pct: null, at: Date.now() })
     if (conflictId) {
       saveLockerToast('blocked', `${match.name} — save conflict`, 'Resolve it to launch')
@@ -431,6 +450,10 @@ async function handleGameActionStart(
     }
     interceptedLaunches.delete(appId)
     preLaunchHandled.add(appId)
+    // GetActiveGameActions coming back empty above means the action is gone, not necessarily that
+    // CancelGameAction is WHY — see blockedLaunches' own doc comment for why this is only believed
+    // cancelled, not confirmed, and needs the bRunning fallback below as a safety net.
+    blockedLaunches.add(appId)
     setChip(appId, { kind: 'conflict', text: 'Conflict', pct: null, at: Date.now() })
     conflictHooks?.openConflictResolveModal(knownConflict.id, {
       showPlayAnyway: true,
@@ -506,6 +529,21 @@ async function handleLifetimeChange(data: SaveLockerAppLifetimeNotification): Pr
     if (trackedLaunches.has(data.unAppID)) return // already handling this launch
     const match = await resolveMatch(data.unAppID)
     if (!match) return
+
+    /**
+     * The fallback kill (see `blockedLaunches`'s own doc comment): a Blocked decision believed it had
+     * cancelled this launch, but the process is genuinely running now — `bRunning` is authoritative in
+     * a way `GetActiveGameActions` right after `CancelGameAction` isn't. Checked BEFORE
+     * `trackedLaunches.set` and consuming `preLaunchHandled`, so this process's own exit (once killed)
+     * is not mistaken for a finished play session and does not trigger a post-play push, and so a
+     * genuine relaunch afterward is not skipped as "already handled."
+     */
+    if (blockedLaunches.has(data.unAppID)) {
+      setChip(data.unAppID, { kind: 'conflict', text: 'Conflict', pct: null, at: Date.now() })
+      saveLockerToast('blocked', `${match.name} was closed`, 'A save conflict is still unresolved — resolve it to play')
+      try { SteamClient.Apps.TerminateApp(data.unAppID.toString(), true) } catch { /* best effort */ }
+      return
+    }
 
     trackedLaunches.set(data.unAppID, match.name)
 

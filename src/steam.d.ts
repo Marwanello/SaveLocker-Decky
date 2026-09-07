@@ -69,8 +69,18 @@ declare const SteamClient: {
     /** Confirms a `CancelGameAction` call actually took: if `gameActionId` is still present here
      * right after cancelling, the pipeline had already moved past a cancellable state and this plugin
      * should back off rather than risk launching a second copy of the game on top of the one Steam is
-     * already starting. */
+     * already starting. Absence here is NOT proof the cancel is why — the action can also be gone
+     * because it already reached `CreatingProcess`, especially for a non-Steam-shortcut launch which
+     * can skip almost every intermediate `LaunchAppTask_t` stage a Steam-store game passes through
+     * first, leaving `CancelGameAction` too little of a window to land even called synchronously. See
+     * `gamingSync.tsx`'s `blockedLaunches` for the fallback this uncertainty requires. */
     GetActiveGameActions(): Promise<{ nGameActionID: number }[]>
+    /** Kills a running app's process (the Library UI's own "Stop"/"Force quit"). `param1`'s exact
+     * meaning is undocumented — real Steam UI code passes a boolean here whose behavior visibly
+     * differs (a graceful stop vs. an immediate one), and this plugin passes `true` for "immediate":
+     * the whole point of calling this is a conflicted save that must not keep running, not a polite
+     * request the game can ignore. Unverified on real hardware which value that actually is. */
+    TerminateApp(appId: string, param1: boolean): void
   }
   GameSessions: {
     RegisterForAppLifetimeNotifications(
