@@ -1,11 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { DialogButton, Focusable, ModalRoot, ToggleField, showModal } from '@decky/ui'
 import { FaCloud, FaMobileAlt } from 'react-icons/fa'
 import { gameIdToAppId } from './gamingSync'
 import { getChip, setChip } from './syncStatus'
 import { saveLockerToast } from './toast'
 import {
-  fetchConflicts, fetchGames, fetchSaveVersion, fetchVersionStats, resolveConflict,
+  fetchConflict, fetchConflicts, fetchGames, fetchSaveVersion, fetchVersionStats, resolveConflict,
   type Conflict, type SaveVersion, type VersionStats,
 } from './shared'
 
@@ -33,6 +33,14 @@ let lastConflictGameIds = new Set<string>()
 
 export function getOpenConflicts(): Conflict[] {
   return openConflicts
+}
+
+/** The already-known conflict for a game, if any — read from the poller's own warm cache, no
+ * network call. `gamingSync.tsx`'s launch gate uses this for its "a conflict is already known"
+ * carve-out (tasks/conflict-resolution-ui/plan.md, Phase 11): reusing this rather than attempting
+ * another sync over the network the moment Play is pressed on a game already known to conflict. */
+export function getOpenConflictForGame(gameId: string): Conflict | null {
+  return openConflicts.find((c) => c.gameId === gameId) ?? null
 }
 
 /** Subscribes a component to the shared conflict list — mirrors `syncStatus.tsx`'s `useSyncChip`. */
@@ -154,8 +162,19 @@ interface Side {
  * Resolves immediately on a side being chosen (`agent-ui`'s `ConflictCard` `'immediate'` mode) rather
  * than a separate confirm step — this is a "decide now so the game/session can move on" surface, not
  * a page to review at leisure the way `agent-ui`'s own Conflicts list is.
+ *
+ * `onClosed` (Phase 11) fires exactly once, on unmount, with whether this closed because the
+ * conflict was actually resolved (`done`) or the player backed out via B/backdrop dismiss without
+ * choosing a side. `gamingSync.tsx`'s launch gate uses it to decide whether to relaunch the game it
+ * cancelled — "(B) Decide later — don't launch yet" in the plan's own mockup means exactly that: no
+ * relaunch, stay blocked. A ref (not `done` captured directly) because the unmount cleanup below
+ * runs once, reading whatever `done` was LAST set to, not whatever it was when the effect was set up.
  */
-function ConflictResolveModal({ conflict, closeModal }: { conflict: Conflict; closeModal?: () => void }) {
+function ConflictResolveModal({ conflict, closeModal, onClosed }: {
+  conflict: Conflict
+  closeModal?: () => void
+  onClosed?: (resolved: boolean) => void
+}) {
   const [gameName, setGameName] = useState(conflict.gameId)
   const [versionA, setVersionA] = useState<SaveVersion | undefined>()
   const [versionB, setVersionB] = useState<SaveVersion | undefined>()
@@ -164,6 +183,9 @@ function ConflictResolveModal({ conflict, closeModal }: { conflict: Conflict; cl
   const [keepBoth, setKeepBoth] = useState(false)
   const [resolving, setResolving] = useState(false)
   const [done, setDone] = useState(false)
+  const doneRef = useRef(false)
+  useEffect(() => { doneRef.current = done }, [done])
+  useEffect(() => () => onClosed?.(doneRef.current), [])
 
   useEffect(() => {
     void fetchGames().then((r) => {
@@ -301,8 +323,26 @@ function ConflictResolveModal({ conflict, closeModal }: { conflict: Conflict; cl
   )
 }
 
-export function openConflictResolveModal(conflictId: string): void {
-  const conflict = openConflicts.find((c) => c.id === conflictId)
-  if (!conflict) return
-  showModal(<ConflictResolveModal conflict={conflict} />)
+/**
+ * `opts.onClosed` (Phase 11) is how `gamingSync.tsx`'s launch gate learns whether to relaunch the
+ * game it cancelled to show this popup — see `ConflictResolveModal`'s own doc comment.
+ *
+ * Falls back to a direct `fetchConflict` when the id isn't in the polled cache yet: the launch gate
+ * hands over a conflict id `pre_launch_sync` just discovered, which can be newer than the poller's
+ * last 20s tick. The caller already knows the id is real (the agent just returned it), so silently
+ * doing nothing here would strand it — better to pay for one fetch than show no popup at all.
+ */
+export function openConflictResolveModal(
+  conflictId: string,
+  opts: { onClosed?: (resolved: boolean) => void } = {},
+): void {
+  const cached = openConflicts.find((c) => c.id === conflictId)
+  if (cached) {
+    showModal(<ConflictResolveModal conflict={cached} onClosed={opts.onClosed} />)
+    return
+  }
+  void fetchConflict(conflictId).then((r) => {
+    if (r.ok) showModal(<ConflictResolveModal conflict={r.data} onClosed={opts.onClosed} />)
+    else opts.onClosed?.(false)
+  })
 }

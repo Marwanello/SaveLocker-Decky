@@ -44,7 +44,7 @@ def _token() -> str | None:
         return None
 
 
-def _request(path: str, payload=None):
+def _request(path: str, payload=None, timeout: int = TIMEOUT):
     token = _token()
     if token is None:
         return {"ok": False, "reason": "no-agent"}
@@ -56,7 +56,7 @@ def _request(path: str, payload=None):
         request.add_header("Content-Type", "application/json")
 
     try:
-        with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             raw = response.read().decode("utf-8")
         return {"ok": True, "data": json.loads(raw) if raw else None}
     except urllib.error.HTTPError as err:
@@ -458,6 +458,21 @@ class Plugin:
     async def version_stats(self, version_id: str):
         """File count and newest-file-write time for one side of a conflict, read from its archive."""
         return _request("/api/versions/%s/stats" % version_id)
+
+    async def pre_launch_sync(self, game_id: str):
+        """
+        The Decky launch gate (tasks/conflict-resolution-ui/plan.md, Phase 11):
+        `gamingSync.tsx` cancels Steam's own launch pipeline the instant it starts, calls this, and
+        only re-triggers the launch once it returns. Wraps `SyncEngine.PrepareLaunchAsync` over HTTP
+        in-process on the daemon, rather than the `sync()` CLI call above, because a launch decision
+        needs a real decision back (Proceed / ProceedSyncPaused / Blocked with a conflict id), not
+        CLI prose to reclassify.
+
+        Same generous timeout as `sync()`: this performs a real push/pull round trip (commit-before-
+        choose), which a slow link or a big save can make genuinely slow — better to wait than to time
+        this out and let a stale save through the gate.
+        """
+        return _request("/api/games/%s/pre-launch-sync" % game_id, {}, timeout=600)
 
     async def _main(self):
         decky.logger.info("SaveLocker plugin loaded; agent state dir: %s", _state_dir())
