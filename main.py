@@ -118,6 +118,55 @@ def _clean_env() -> dict:
     return env
 
 
+async def _process_tree(pid: int) -> list[str]:
+    """
+    Every descendant of `pid` (children, grandchildren, ...), walked breadth-first via `ps --ppid`
+    one level at a time — the same technique SDH-PauseGames (github.com/popsUlfr/SDH-PauseGames, a
+    mature, widely-used Decky plugin) uses to find every process under a game's `reaper` wrapper,
+    since Steam wraps every launch (including a non-Steam shortcut run under Proton) in `reaper`
+    specifically so it can track and signal the whole tree reliably. `pid` itself is NOT included —
+    callers signal it separately, and `pause_process_tree`/`resume_process_tree`/`kill_process_tree`
+    below deliberately never signal the reaper itself, matching that plugin's own approach: the
+    reaper's only job is waiting on and forwarding signals to its child, not touching the save file
+    or consuming CPU/GPU, so there is nothing to gain from freezing it and a real risk in interfering
+    with its own signal handling.
+    """
+    pids: list[str] = []
+    frontier = [str(pid)]
+    while frontier:
+        parent = frontier.pop(0)
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ps", "--ppid", parent, "-o", "pid=",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await proc.communicate()
+        except OSError:
+            continue
+        children = stdout.decode().split()
+        pids.extend(children)
+        frontier.extend(children)
+    return pids
+
+
+async def _signal_tree(pid: int, sig: str) -> bool:
+    """Sends `sig` (a `kill(1)` signal name, e.g. "-SIGSTOP") to every descendant of `pid` — see
+    `_process_tree`'s own doc comment for why `pid` itself is deliberately excluded. `False` for an
+    empty tree (the launch may already have exited on its own) rather than treating "nothing to
+    signal" as success — a caller acting on that distinction (`pause_process_tree`'s result decides
+    whether `gamingSync.tsx` falls back to `SteamClient.Apps.TerminateApp`) needs to tell the two
+    apart."""
+    pids = await _process_tree(pid)
+    if not pids:
+        return False
+    try:
+        proc = await asyncio.create_subprocess_exec("kill", sig, *pids)
+        await proc.wait()
+        return proc.returncode == 0
+    except OSError:
+        return False
+
+
 def _user_systemd_env() -> dict:
     """
     The environment `systemctl --user` needs, which a plugin host does not supply.
@@ -486,6 +535,32 @@ class Plugin:
         rather than report a false timeout.
         """
         return _request("/api/games/%s/sync-status" % game_id, timeout=60)
+
+    async def pause_process_tree(self, pid: int) -> bool:
+        """
+        Freezes (SIGSTOP) a launch's whole process tree, rooted at `pid` — the `reaper` PID
+        `gamingSync.tsx` reads off `RegisterForAppLifetimeNotifications`'s own `nInstanceID`.
+
+        The fallback for when a Blocked pre-launch-sync decision (tasks/conflict-resolution-ui/
+        plan.md, Phase 11) could not actually stop the launch: `SteamClient.Apps.CancelGameAction`
+        is undocumented and best-effort (steam.d.ts's own comment), and can lose the race entirely
+        for a non-Steam-shortcut launch. Freezing instead of killing outright means the process
+        stops touching the save file (the actual risk) without losing whatever it already has in
+        memory — `resume_process_tree` below can pick it back up exactly where it was.
+        """
+        return await _signal_tree(pid, "-SIGSTOP")
+
+    async def resume_process_tree(self, pid: int) -> bool:
+        """Un-freezes a tree `pause_process_tree` froze — the launch continues from exactly where
+        it was, in place of a fresh `SteamClient.Apps.RunGame` call that would otherwise race a
+        process that never actually stopped existing."""
+        return await _signal_tree(pid, "-SIGCONT")
+
+    async def kill_process_tree(self, pid: int) -> bool:
+        """Ends a tree `pause_process_tree` froze, for when the player backs out of the resolve
+        popup instead of playing — "decide later" means nothing keeps running, the same as if the
+        cancel this was a fallback for had actually worked."""
+        return await _signal_tree(pid, "-SIGKILL")
 
     async def _main(self):
         decky.logger.info("SaveLocker plugin loaded; agent state dir: %s", _state_dir())

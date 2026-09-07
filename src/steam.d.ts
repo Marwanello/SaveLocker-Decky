@@ -28,6 +28,13 @@ interface SaveLockerUnregisterable {
  */
 interface SaveLockerAppLifetimeNotification {
   unAppID: number
+  /** PID of the running process — the `reaper` wrapper's own PID for a non-Steam shortcut
+   * (SaveLocker's target here), the first child's PID for an actual Steam-store app. Confirmed
+   * present on this exact payload by SDH-PauseGames (github.com/popsUlfr/SDH-PauseGames), a
+   * mature, widely-used Decky plugin whose whole pause/resume feature depends on reading it here —
+   * not something this plugin discovered on its own. `gamingSync.tsx`'s pause/resume fallback
+   * (Bug 3) uses it to find the process tree to signal, the same technique that plugin uses. */
+  nInstanceID: number
   bRunning: boolean
 }
 
@@ -73,13 +80,14 @@ declare const SteamClient: {
      * because it already reached `CreatingProcess`, especially for a non-Steam-shortcut launch which
      * can skip almost every intermediate `LaunchAppTask_t` stage a Steam-store game passes through
      * first, leaving `CancelGameAction` too little of a window to land even called synchronously. See
-     * `gamingSync.tsx`'s `blockedLaunches` for the fallback this uncertainty requires. */
+     * `gamingSync.tsx`'s `pendingBlock`/`pausedLaunches` for the fallback this uncertainty requires. */
     GetActiveGameActions(): Promise<{ nGameActionID: number }[]>
     /** Kills a running app's process (the Library UI's own "Stop"/"Force quit"). `param1`'s exact
      * meaning is undocumented — real Steam UI code passes a boolean here whose behavior visibly
-     * differs (a graceful stop vs. an immediate one), and this plugin passes `true` for "immediate":
-     * the whole point of calling this is a conflicted save that must not keep running, not a polite
-     * request the game can ignore. Unverified on real hardware which value that actually is. */
+     * differs (a graceful stop vs. an immediate one), and this plugin passes `true` for "immediate".
+     * Last resort only: `gamingSync.tsx` reaches for this solely when the SIGSTOP-a-process-tree
+     * fallback (`pause_process_tree`, main.py) itself fails — a conflicted save must not keep running
+     * even then. Unverified on real hardware which `param1` value that actually is. */
     TerminateApp(appId: string, param1: boolean): void
   }
   GameSessions: {
