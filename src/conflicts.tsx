@@ -200,15 +200,19 @@ function ConflictResolveModal({ conflict, closeModal, onClosed, showPlayAnyway }
   useEffect(() => () => onClosed?.(outcomeRef.current), [])
 
   useEffect(() => {
+    // Guards every setter below: the player can back out (B/backdrop) while any of these five fetches
+    // are still in flight, and this component will already be unmounted by the time they resolve.
+    let cancelled = false
     void fetchGames().then((r) => {
-      if (!r.ok) return
+      if (cancelled || !r.ok) return
       const g = r.data.find((g) => g.gameId === conflict.gameId)
       if (g) setGameName(g.alias ?? g.name)
     })
-    void fetchSaveVersion(conflict.versionAId).then((r) => { if (r.ok) setVersionA(r.data) })
-    void fetchSaveVersion(conflict.versionBId).then((r) => { if (r.ok) setVersionB(r.data) })
-    void fetchVersionStats(conflict.versionAId).then((r) => { if (r.ok) setStatsA(r.data) })
-    void fetchVersionStats(conflict.versionBId).then((r) => { if (r.ok) setStatsB(r.data) })
+    void fetchSaveVersion(conflict.versionAId).then((r) => { if (!cancelled && r.ok) setVersionA(r.data) })
+    void fetchSaveVersion(conflict.versionBId).then((r) => { if (!cancelled && r.ok) setVersionB(r.data) })
+    void fetchVersionStats(conflict.versionAId).then((r) => { if (!cancelled && r.ok) setStatsA(r.data) })
+    void fetchVersionStats(conflict.versionBId).then((r) => { if (!cancelled && r.ok) setStatsB(r.data) })
+    return () => { cancelled = true }
   }, [conflict.id])
 
   const resolve = async (winningVersionId: string) => {
@@ -225,6 +229,11 @@ function ConflictResolveModal({ conflict, closeModal, onClosed, showPlayAnyway }
       } else {
         saveLockerToast('blocked', `Could not resolve ${gameName}'s conflict`, r.reason)
       }
+    } catch {
+      // A transport-layer rejection, not a `{ok:false}` resolution — without this, the button just
+      // re-enables (via `finally` below) with no explanation at all, which reads as broken since
+      // there's no console visible in Big Picture/Gaming Mode to show what actually happened.
+      saveLockerToast('blocked', `Could not resolve ${gameName}'s conflict`, 'unexpected error')
     } finally {
       setResolving(false)
     }
@@ -381,5 +390,10 @@ export function openConflictResolveModal(
         <ConflictResolveModal conflict={r.data} onClosed={opts.onClosed} showPlayAnyway={opts.showPlayAnyway} />,
       )
     } else opts.onClosed?.('cancelled')
+  }).catch(() => {
+    // A transport-layer rejection, not a `{ok:false}` resolution — without this, a caller waiting on
+    // `onClosed` (e.g. `gamingSync.tsx`'s launch gate) never hears back at all, stranding whatever it
+    // was waiting to resolve (a cancelled launch, a frozen process) with no popup and no way out.
+    opts.onClosed?.('cancelled')
   })
 }

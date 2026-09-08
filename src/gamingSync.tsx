@@ -90,6 +90,11 @@ interface ConflictHooks {
     conflictId: string,
     opts?: { onClosed?: (outcome: 'resolved' | 'playAnyway' | 'cancelled') => void; showPlayAnyway?: boolean },
   ) => void
+  /** Forces the poller's next tick to run immediately. Called wherever a launch decision is about to
+   * be gated on `getOpenConflictForGame`'s cached list, so the window in which that cache can be
+   * stale (up to `conflicts.tsx`'s poll interval) is as short as possible for whatever check comes
+   * next — a retried Play press, or this same popup reopening. */
+  refreshConflictsSoon: () => void
 }
 let conflictHooks: ConflictHooks | null = null
 export function setConflictHooks(hooks: ConflictHooks): void { conflictHooks = hooks }
@@ -111,11 +116,13 @@ export async function persistSyncOnOpen(gameId: string, enabled: boolean | null)
 // Module scope, not React state: this needs to be read from a SteamClient callback that fires
 // outside any component's lifetime, same reasoning as index.tsx's `stickyTarget`.
 let gamingSyncEnabled = true
-// steamAppId -> the tracked game's name, for whichever launches this session has pulled for (or
-// skipped pulling for, per the setting below) and is waiting to push on close. In-memory only: a
-// Decky/plugin reload mid-game loses this session's close-side push, an accepted, documented
-// limitation rather than something persisted.
-const trackedLaunches = new Map<number, string>()
+// steamAppId -> the tracked game's name and the process instance this session is tracking, for
+// whichever launches this session has pulled for (or skipped pulling for, per the setting below) and
+// is waiting to push on close. `pid` doubles as a way to tell a genuinely new process instance apart
+// from a redundant `bRunning` re-fire for the one already tracked — see its use in
+// `handleLifetimeChange`. In-memory only: a Decky/plugin reload mid-game loses this session's
+// close-side push, an accepted, documented limitation rather than something persisted.
+const trackedLaunches = new Map<number, { name: string; pid: number }>()
 
 /**
  * A local mirror of `rows()`/`games()`, refreshed on an interval rather than fetched per call.
@@ -366,6 +373,28 @@ async function killBlockedLaunch(appId: number, gameName: string): Promise<void>
   saveLockerToast('blocked', `${gameName} was closed`, 'The save conflict is still unresolved')
 }
 
+/** Freezes (SIGSTOP) a game that turns out to already be running when a Blocked decision is found for
+ * it — used both by `handleLifetimeChange`'s fast-path check (a believed-cancelled launch that raced
+ * ahead anyway) and its slow-path fallback (a launch `RegisterForGameActionStart` never saw, already
+ * running by the time a conflict is discovered for it). Falls back to `SteamClient.Apps.TerminateApp`
+ * if the freeze itself fails: leaving a conflicted save running unfrozen is not an acceptable outcome
+ * even then. Tracks the launch the same as a normal one on a successful freeze, so a later resume via
+ * `continueLaunch` (SIGCONT, no fresh `RunGame`, so no fresh `bRunning` event) still has an entry for
+ * `handleLifetimeChange`'s `bRunning:false` push to find once the player actually stops playing. */
+async function freezeOrTerminate(appId: number, pid: number, gameName: string): Promise<void> {
+  const paused = pid ? await pauseProcessTree(pid) : false
+  if (paused) {
+    pausedLaunches.set(appId, pid)
+    trackedLaunches.set(appId, { name: gameName, pid })
+    setChip(appId, { kind: 'conflict', text: 'Paused', pct: null, at: Date.now() })
+    saveLockerToast('blocked', `${gameName} paused`, 'A save conflict is still unresolved — resolve it to continue')
+  } else {
+    setChip(appId, { kind: 'conflict', text: 'Conflict', pct: null, at: Date.now() })
+    saveLockerToast('blocked', `${gameName} was closed`, 'A save conflict is still unresolved — resolve it to play')
+    try { SteamClient.Apps.TerminateApp(appId.toString(), true) } catch { /* best effort */ }
+  }
+}
+
 /**
  * Acts on `pre_launch_sync`'s answer (tasks/conflict-resolution-ui/plan.md, Phase 11).
  * `Proceed`/`ProceedSyncPaused` relaunch immediately, same as the old plain-pull path always did.
@@ -392,11 +421,14 @@ function handlePreLaunchResult(
 
   const { decision, reason, conflictId, holderMachineName } = r.data
   if (decision === 'Blocked') {
-    // See pendingBlock's own doc comment: the cancel this branch's caller already attempted is
-    // best-effort and can lose the race, so this is believed-cancelled, not confirmed-cancelled.
-    pendingBlock.add(appId)
     setChip(appId, { kind: 'conflict', text: 'Conflict', pct: null, at: Date.now() })
     if (conflictId) {
+      // See pendingBlock's own doc comment: the cancel this branch's caller already attempted is
+      // best-effort and can lose the race, so this is believed-cancelled, not confirmed-cancelled.
+      // Added only here, inside this branch, since only this branch actually opens a popup whose
+      // `onClosed` eventually clears it — the defensive branch below has none, so adding it there
+      // would leak it onto some later, unrelated launch of this same game.
+      pendingBlock.add(appId)
       saveLockerToast('blocked', `${match.name} — save conflict`, 'Resolve it to launch')
       // showPlayAnyway: true — the launch is still cancelled and waiting on this popup, so "launch
       // anyway, unresolved" is a real option here, unlike the page-open/already-running triggers.
@@ -444,9 +476,10 @@ function handlePreLaunchResult(
  * fallback in `handleLifetimeChange` still catches it a little later with an authoritative, freshly
  * fetched answer, exactly the old best-effort behaviour.
  *
- * The `finally` below always re-triggers the launch, success, refusal, or exception alike — this
- * plugin delaying a launch is acceptable, this plugin ever silently stranding one on a cancelled
- * action without retrying is not.
+ * The pre-launch-sync try/catch below always re-triggers the launch — success and refusal via
+ * `handlePreLaunchResult`, a transport-layer exception via the catch clause itself — this plugin
+ * delaying a launch is acceptable, this plugin ever silently stranding one on a cancelled action
+ * without retrying is not.
  */
 /**
  * `RegisterForGameActionStart`'s `appId` string is a plain small decimal AppID for a genuine
@@ -489,22 +522,21 @@ async function handleGameActionStart(
   const match = resolveMatchSync(appId)
   if (!match) return
 
-  if (!resolvePullEnabled(match)) {
-    preLaunchHandled.add(appId) // seen and intentionally skipped — bRunning below should not retry
-    saveLockerToast('info', `Pull before launch is disabled for ${match.name}`)
-    return
-  }
-
-  const syncOnOpen = resolveSyncOnOpenEnabled(match.gameId)
-
   /**
    * A conflict already known for this game (Phase 10's poller, or a check moments ago) short-
    * circuits straight to cancel-and-resolve, reusing that known conflict id rather than attempting
    * another sync over the network — this is the carve-out plan.md's Phase 11 section calls for: the
    * "sync on page open is fresh, skip re-checking" optimization below is only valid when there is
-   * nothing wrong, and a known conflict is the one case where it must not apply.
+   * nothing wrong, and a known conflict is the one case where it must not apply. Checked before the
+   * pull-before-launch gate below, too — Steam Cloud (or an explicit override) turning off this
+   * file's own pull must not also turn off blocking on a save conflict SaveLocker already knows is
+   * open, or every such game would launch straight through an unresolved conflict by default.
    */
   const knownConflict = conflictHooks?.getOpenConflictForGame(match.gameId) ?? null
+  // The cache above can be up to `conflicts.tsx`'s poll interval stale — kick off a fresh poll now
+  // regardless of what it found, so a retried Play press (or this popup reopening) sees fresher data
+  // sooner than the timer alone would provide.
+  conflictHooks?.refreshConflictsSoon()
   if (knownConflict) {
     interceptedLaunches.add(appId)
     try {
@@ -535,6 +567,14 @@ async function handleGameActionStart(
     })
     return
   }
+
+  if (!resolvePullEnabled(match)) {
+    preLaunchHandled.add(appId) // seen and intentionally skipped — bRunning below should not retry
+    saveLockerToast('info', `Pull before launch is disabled for ${match.name}`)
+    return
+  }
+
+  const syncOnOpen = resolveSyncOnOpenEnabled(match.gameId)
 
   /**
    * "Sync on page open" owns checking for this game, so launching should not check a second time —
@@ -581,6 +621,13 @@ async function handleGameActionStart(
     if (joining) await pullsInFlight.get(appId)
     const r = await preLaunchSync(match.gameId)
     handlePreLaunchResult(r, match, appId, appIdStr, launchSource, syncOnOpen)
+  } catch {
+    // A transport-layer rejection, not a `{ok:false}` resolution — treat it the same way as one:
+    // this plugin delaying a launch is acceptable, silently stranding one on an already-cancelled
+    // action without retrying is not (see this function's own doc comment above).
+    setChip(appId, { kind: 'blocked', text: 'Launched unsynced', pct: null, at: Date.now() })
+    if (!syncOnOpen) saveLockerToast('blocked', `Pre-launch check failed for ${match.name}`, 'unexpected error')
+    relaunch(appId, appIdStr, launchSource, match.name)
   } finally {
     interceptedLaunches.delete(appId)
     preLaunchHandled.add(appId)
@@ -591,7 +638,19 @@ async function handleLifetimeChange(data: SaveLockerAppLifetimeNotification): Pr
   if (!gamingSyncEnabled) return
 
   if (data.bRunning) {
-    if (trackedLaunches.has(data.unAppID)) return // already handling this launch
+    const existing = trackedLaunches.get(data.unAppID)
+    if (existing) {
+      // Already tracking a launch for this appId. A DIFFERENT process instance reporting bRunning
+      // while one is already tracked means a launch this plugin believed it cancelled actually raced
+      // its own relaunch and started a second copy (`SteamClient.Apps.CancelGameAction` is
+      // best-effort — see `handlePreLaunchResult`'s callers) — kill the newer duplicate's process
+      // tree specifically, rather than the whole app, so the copy already being tracked is left alone.
+      if (data.nInstanceID && existing.pid !== data.nInstanceID) {
+        void killProcessTree(data.nInstanceID)
+        saveLockerToast('blocked', `${existing.name} launched twice`, 'Closed the duplicate copy')
+      }
+      return
+    }
     const match = await resolveMatch(data.unAppID)
     if (!match) return
 
@@ -604,29 +663,15 @@ async function handleLifetimeChange(data: SaveLockerAppLifetimeNotification): Pr
      * push, and so a genuine relaunch/resume afterward is not skipped as "already handled."
      *
      * `nInstanceID` (the launch's `reaper` PID, per SDH-PauseGames — see steam.d.ts) lets this freeze
-     * the process tree (SIGSTOP, `pause_process_tree` in main.py) instead of killing it outright: the
-     * conflict popup is already open from whichever caller set `pendingBlock`, so freezing just stops
-     * the process touching the save file while the player decides, and `continueLaunch` can resume it
-     * exactly where it was rather than starting over. Only falls back to
-     * `SteamClient.Apps.TerminateApp` if the freeze itself fails — leaving a conflicted save running
-     * unfrozen is not an acceptable outcome even then.
+     * the process tree (SIGSTOP, `pause_process_tree` in main.py) instead of killing it outright — see
+     * `freezeOrTerminate`'s own doc comment for what happens if the freeze itself fails.
      */
     if (pendingBlock.delete(data.unAppID)) {
-      const pid = data.nInstanceID
-      const paused = pid ? await pauseProcessTree(pid) : false
-      if (paused) {
-        pausedLaunches.set(data.unAppID, pid)
-        setChip(data.unAppID, { kind: 'conflict', text: 'Paused', pct: null, at: Date.now() })
-        saveLockerToast('blocked', `${match.name} paused`, 'A save conflict is still unresolved — resolve it to continue')
-      } else {
-        setChip(data.unAppID, { kind: 'conflict', text: 'Conflict', pct: null, at: Date.now() })
-        saveLockerToast('blocked', `${match.name} was closed`, 'A save conflict is still unresolved — resolve it to play')
-        try { SteamClient.Apps.TerminateApp(data.unAppID.toString(), true) } catch { /* best effort */ }
-      }
+      await freezeOrTerminate(data.unAppID, data.nInstanceID, match.name)
       return
     }
 
-    trackedLaunches.set(data.unAppID, match.name)
+    trackedLaunches.set(data.unAppID, { name: match.name, pid: data.nInstanceID })
 
     // `Set.delete` returns whether the value was present: consumes the flag and checks it in one
     // step. If `handleGameActionStart` already handled (or intentionally skipped) this exact launch,
@@ -634,23 +679,35 @@ async function handleLifetimeChange(data: SaveLockerAppLifetimeNotification): Pr
     // (cold cache, or a Steam build that doesn't fire `RegisterForGameActionStart` for this app).
     if (preLaunchHandled.delete(data.unAppID)) return
 
+    // The game is ALREADY RUNNING by the time this fallback fires (RegisterForGameActionStart never
+    // saw this launch) — there is no launch left to cancel here, only to check, freeze if blocked, and
+    // report. A known conflict still opens the same resolve popup the fast path would have and freezes
+    // the already-running process the same way (no `showPlayAnyway`: there is no pending launch to
+    // proceed with — resolving here just settles the conflict and lets the player keep playing).
+    // Checked before the pull-before-launch gate below, same reasoning as the fast path above: Steam
+    // Cloud (or an explicit override) turning off this file's own pull must not also turn off blocking
+    // on a conflict SaveLocker already knows is open.
+    const knownConflict = conflictHooks?.getOpenConflictForGame(match.gameId) ?? null
+    // The cache above can be up to `conflicts.tsx`'s poll interval stale — kick off a fresh poll now
+    // regardless of what it found, tightening the window for whatever check comes next.
+    conflictHooks?.refreshConflictsSoon()
+    if (knownConflict) {
+      await freezeOrTerminate(data.unAppID, data.nInstanceID, match.name)
+      conflictHooks?.openConflictResolveModal(knownConflict.id, {
+        onClosed: (outcome) => {
+          if (outcome === 'cancelled') void killBlockedLaunch(data.unAppID, match.name)
+          else void continueLaunch(data.unAppID, data.unAppID.toString(), 0, match.name)
+        },
+      })
+      return
+    }
+
     if (!resolvePullEnabled(match)) {
       saveLockerToast('info', `Pull before launch is disabled for ${match.name}`)
       return
     }
 
-    // The game is ALREADY RUNNING by the time this fallback fires (RegisterForGameActionStart never
-    // saw this launch) — there is no launch left to cancel or block here, only to check and report.
-    // A known conflict still opens the same resolve popup the fast path would have (no
-    // `showPlayAnyway`: the game is already running, so there is no pending launch to proceed with —
-    // resolving here just settles the conflict for next time).
     const syncOnOpen = resolveSyncOnOpenEnabled(match.gameId)
-    const knownConflict = conflictHooks?.getOpenConflictForGame(match.gameId) ?? null
-    if (knownConflict) {
-      setChip(data.unAppID, { kind: 'conflict', text: 'Conflict', pct: null, at: Date.now() })
-      conflictHooks?.openConflictResolveModal(knownConflict.id)
-      return
-    }
 
     // Same "sync on page open already did this" skip as the fast path above, for the same reasons —
     // this fallback fires for launches `RegisterForGameActionStart` never saw, and those deserve the
@@ -665,16 +722,24 @@ async function handleLifetimeChange(data: SaveLockerAppLifetimeNotification): Pr
     }
     const r = await preLaunchSync(match.gameId)
     if (!r.ok) {
-      setChip(data.unAppID, { kind: 'blocked', text: 'Blocked', pct: null, reason: r.reason, at: Date.now() })
-      if (!syncOnOpen) saveLockerToast('blocked', `Check blocked for ${match.name}`, r.reason)
+      setChip(data.unAppID, { kind: 'blocked', text: 'Launched unsynced', pct: null, reason: r.reason, at: Date.now() })
+      if (!syncOnOpen) saveLockerToast('blocked', `Pre-launch check failed for ${match.name}`, r.reason)
       return
     }
     if (r.data.decision === 'Blocked') {
-      setChip(data.unAppID, { kind: 'conflict', text: 'Conflict', pct: null, at: Date.now() })
+      await freezeOrTerminate(data.unAppID, data.nInstanceID, match.name)
       // Same reasoning as the knownConflict branch above: the game is already running, so this just
-      // surfaces the resolve popup, no showPlayAnyway and nothing to relaunch afterward.
-      if (r.data.conflictId) conflictHooks?.openConflictResolveModal(r.data.conflictId)
-      else saveLockerToast('blocked', `${match.name} — save conflict`, 'Resolve it in the plugin')
+      // surfaces the resolve popup, freezing/killing first and resuming or relaunching on close.
+      if (r.data.conflictId) {
+        conflictHooks?.openConflictResolveModal(r.data.conflictId, {
+          onClosed: (outcome) => {
+            if (outcome === 'cancelled') void killBlockedLaunch(data.unAppID, match.name)
+            else void continueLaunch(data.unAppID, data.unAppID.toString(), 0, match.name)
+          },
+        })
+      } else {
+        saveLockerToast('blocked', `${match.name} — save conflict`, 'Resolve it in the plugin')
+      }
       return
     }
     const paused = r.data.decision === 'ProceedSyncPaused'
@@ -687,8 +752,8 @@ async function handleLifetimeChange(data: SaveLockerAppLifetimeNotification): Pr
     })
     if (!syncOnOpen) saveLockerToast(paused ? 'blocked' : 'success', paused ? `${match.name} launched without pulling` : `Synced ${match.name}`)
   } else {
-    const name = trackedLaunches.get(data.unAppID)
-    if (name === undefined) return
+    const tracked = trackedLaunches.get(data.unAppID)
+    if (tracked === undefined) return
     trackedLaunches.delete(data.unAppID)
 
     // The push after a play session runs while NO library page is mounted — the user is on the
@@ -696,9 +761,9 @@ async function handleLifetimeChange(data: SaveLockerAppLifetimeNotification): Pr
     // the point: navigating back to the game afterwards is exactly when they want to see whether
     // this session's progress made it to the server, and before this the chip was empty there.
     setChip(data.unAppID, { kind: 'syncing', text: 'Saving…', pct: null, at: Date.now() })
-    saveLockerToast('syncing', `Syncing ${name} after play…`)
-    const r = await runSyncForGaming('push', name, false)
-    reportSyncOutcome('push', name, r, { appId: data.unAppID })
+    saveLockerToast('syncing', `Syncing ${tracked.name} after play…`)
+    const r = await runSyncForGaming('push', tracked.name, false)
+    reportSyncOutcome('push', tracked.name, r, { appId: data.unAppID })
   }
 }
 

@@ -9,7 +9,7 @@ import { GamingSyncSettings, registerGamingModeSync, setConflictHooks, unregiste
 import { classifySyncOutput } from './syncStatus'
 import { registerLibraryOverlay, unregisterLibraryOverlay } from './libraryOverlay'
 import {
-  getOpenConflictForGame, openConflictResolveModal, registerConflictPolling,
+  getOpenConflictForGame, openConflictResolveModal, refreshConflictsSoon, registerConflictPolling,
   unregisterConflictPolling, useOpenConflicts,
 } from './conflicts'
 import { FullPage, SAVELOCKER_PAGE_ROUTE } from './fullPage'
@@ -664,7 +664,7 @@ export default definePlugin(() => {
   // popup, but conflicts.tsx already imports gameIdToAppId FROM gamingSync.tsx — importing back
   // would make the two modules circular. Wiring the two functions in here, at the one place that
   // already imports both, avoids that; see gamingSync.tsx's own ConflictHooks doc comment.
-  setConflictHooks({ getOpenConflictForGame, openConflictResolveModal })
+  setConflictHooks({ getOpenConflictForGame, openConflictResolveModal, refreshConflictsSoon })
   // Wired once, at plugin load, rather than from Content()'s mount — see registerGamingModeSync's
   // own doc comment in gamingSync.tsx for why that timing matters. registerConflictPolling shares
   // that reasoning: a conflict found while no relevant page is open should still have the QAM badge

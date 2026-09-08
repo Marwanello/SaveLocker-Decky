@@ -13,6 +13,7 @@ import {
 } from './shared'
 import { openConflictResolveModal } from './conflicts'
 import { persistSyncOnOpen, resolvePullEnabled } from './gamingSync'
+import { saveLockerToast } from './toast'
 
 /** The three values verbatim (`ConflictPolicy` in `src/Shared/Contracts.cs`) — "Prefer this device"
  * rather than a full machine picker, since a Decky settings row has no fleet-wide machine list to
@@ -80,6 +81,12 @@ function GameRow({ game, syncOnOpenEnabled, machineId, onChanged, onSyncOnOpenCh
   }
 
   const changePolicy = async (next: ConflictPolicyKind) => {
+    if (next === 'PreferMachine' && machineId === null) {
+      // This device hasn't registered with the agent yet, so there is no machine id to prefer —
+      // persisting the policy anyway would silently set "Prefer this device" with no device recorded.
+      saveLockerToast('blocked', 'Cannot prefer this device yet', 'It has not registered with the agent')
+      return
+    }
     setPolicyBusy(true)
     try {
       const preferredMachineId = next === 'PreferMachine' ? machineId : null

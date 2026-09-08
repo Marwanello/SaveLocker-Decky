@@ -62,7 +62,12 @@ def _request(path: str, payload=None, timeout: int = TIMEOUT):
     except urllib.error.HTTPError as err:
         decky.logger.warning("SaveLocker agent returned HTTP %s for %s", err.code, path)
         return {"ok": False, "reason": f"http-{err.code}"}
-    except (urllib.error.URLError, TimeoutError, OSError):
+    except TimeoutError:
+        # A real timeout, not "no agent" — long-running routes (pre_launch_sync, sync_status) attach
+        # generous timeouts specifically because the underlying work can be slow but is still bounded,
+        # so this deserves its own reason rather than reading as "the agent is not running."
+        return {"ok": False, "reason": "timeout"}
+    except (urllib.error.URLError, OSError):
         # The daemon is not running. Expected on a Deck that has not started it yet.
         return {"ok": False, "reason": "unreachable"}
     except json.JSONDecodeError:
@@ -120,18 +125,22 @@ def _clean_env() -> dict:
 
 async def _process_tree(pid: int) -> list[str]:
     """
-    Every descendant of `pid` (children, grandchildren, ...), walked breadth-first via `ps --ppid`
-    one level at a time — the same technique SDH-PauseGames (github.com/popsUlfr/SDH-PauseGames, a
-    mature, widely-used Decky plugin) uses to find every process under a game's `reaper` wrapper,
-    since Steam wraps every launch (including a non-Steam shortcut run under Proton) in `reaper`
-    specifically so it can track and signal the whole tree reliably. `pid` itself is NOT included —
-    callers signal it separately, and `pause_process_tree`/`resume_process_tree`/`kill_process_tree`
-    below deliberately never signal the reaper itself, matching that plugin's own approach: the
-    reaper's only job is waiting on and forwarding signals to its child, not touching the save file
-    or consuming CPU/GPU, so there is nothing to gain from freezing it and a real risk in interfering
-    with its own signal handling.
+    `pid` itself plus every descendant (children, grandchildren, ...), walked breadth-first via
+    `ps --ppid` one level at a time — the same technique SDH-PauseGames
+    (github.com/popsUlfr/SDH-PauseGames, a mature, widely-used Decky plugin) uses to find every
+    process under a game's `reaper` wrapper.
+
+    `pid` is included, unlike that plugin's own approach of signalling only the reaper's children:
+    `gamingSync.tsx`'s `nInstanceID` (what callers pass here) is the `reaper`'s own PID for a
+    non-Steam shortcut, but the first CHILD's PID — i.e. the actual game process, not a wrapper — for
+    an ordinary Steam-store title (see `steam.d.ts`'s own doc comment on that field). Excluding `pid`
+    unconditionally left every childless Steam-store game with nothing to signal at all: an empty
+    descendant list read as "freeze failed," so `gamingSync.tsx` fell back to
+    `SteamClient.Apps.TerminateApp` — a hard kill — for exactly the common case this whole mechanism
+    exists to avoid. Including the reaper too, for the shortcut case, is harmless: it is paused and
+    resumed in lockstep with its children by every caller below, never signalled on its own.
     """
-    pids: list[str] = []
+    pids: list[str] = [str(pid)]
     frontier = [str(pid)]
     while frontier:
         parent = frontier.pop(0)
@@ -150,12 +159,11 @@ async def _process_tree(pid: int) -> list[str]:
 
 
 async def _signal_tree(pid: int, sig: str) -> bool:
-    """Sends `sig` (a `kill(1)` signal name, e.g. "-SIGSTOP") to every descendant of `pid` — see
-    `_process_tree`'s own doc comment for why `pid` itself is deliberately excluded. `False` for an
-    empty tree (the launch may already have exited on its own) rather than treating "nothing to
-    signal" as success — a caller acting on that distinction (`pause_process_tree`'s result decides
-    whether `gamingSync.tsx` falls back to `SteamClient.Apps.TerminateApp`) needs to tell the two
-    apart."""
+    """Sends `sig` (a `kill(1)` signal name, e.g. "-SIGSTOP") to `pid` and every descendant — see
+    `_process_tree`'s own doc comment for why `pid` itself is included. `kill`'s own exit code is what
+    actually tells success from failure now (e.g. `pid` has already exited on its own); a caller
+    acting on that distinction (`pause_process_tree`'s result decides whether `gamingSync.tsx` falls
+    back to `SteamClient.Apps.TerminateApp`) needs it to be accurate."""
     pids = await _process_tree(pid)
     if not pids:
         return False
@@ -520,8 +528,14 @@ class Plugin:
         Same generous timeout as `sync()`: this performs a real push/pull round trip (commit-before-
         choose), which a slow link or a big save can make genuinely slow — better to wait than to time
         this out and let a stale save through the gate.
+
+        Run off-thread rather than calling `_request` directly: `_request` is a synchronous
+        `urllib.request.urlopen` call, and Decky Loader shares one asyncio event loop across every
+        installed plugin. A 5-second worst case there was tolerable; a 600-second one is not — it would
+        freeze every other plugin's async calls for as long as the agent takes to answer, not just this
+        one's, exactly the class of bug `sync()` above avoids by using an async subprocess instead.
         """
-        return _request("/api/games/%s/pre-launch-sync" % game_id, {}, timeout=600)
+        return await asyncio.to_thread(_request, "/api/games/%s/pre-launch-sync" % game_id, {}, timeout=600)
 
     async def sync_status(self, game_id: str):
         """
@@ -532,14 +546,18 @@ class Plugin:
 
         A longer-than-default timeout for the same reason `sync()` above needs one: hashing a large
         save folder over local disk is usually fast but not bounded, and this should wait it out
-        rather than report a false timeout.
+        rather than report a false timeout. Run off-thread for the same reason `pre_launch_sync` above
+        is: `_request` blocks synchronously, and this shared event loop cannot afford up to 60 seconds
+        of that on every other plugin's behalf.
         """
-        return _request("/api/games/%s/sync-status" % game_id, timeout=60)
+        return await asyncio.to_thread(_request, "/api/games/%s/sync-status" % game_id, timeout=60)
 
     async def pause_process_tree(self, pid: int) -> bool:
         """
-        Freezes (SIGSTOP) a launch's whole process tree, rooted at `pid` — the `reaper` PID
-        `gamingSync.tsx` reads off `RegisterForAppLifetimeNotifications`'s own `nInstanceID`.
+        Freezes (SIGSTOP) a launch's whole process tree, rooted at `pid` — `gamingSync.tsx`'s
+        `nInstanceID`, read off `RegisterForAppLifetimeNotifications` (the `reaper` PID for a
+        non-Steam shortcut, or the actual game process for an ordinary Steam-store title — see
+        `_process_tree`'s own doc comment for why both are included in what gets signalled).
 
         The fallback for when a Blocked pre-launch-sync decision (tasks/conflict-resolution-ui/
         plan.md, Phase 11) could not actually stop the launch: `SteamClient.Apps.CancelGameAction`
