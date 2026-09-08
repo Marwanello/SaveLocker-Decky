@@ -1,15 +1,28 @@
 import { useEffect, useState } from 'react'
 import {
-  DialogButton, Focusable, PanelSection, PanelSectionRow, Tabs, TextField, ToggleField,
+  DialogButton, DropdownItem, Focusable, PanelSection, PanelSectionRow, Tabs, TextField, ToggleField,
 } from '@decky/ui'
 import { callable } from '@decky/api'
 import {
   ReadOnlyRow, applyAll, shortState, summarise, timeAgo,
-  fetchGames, fetchState, fetchVersion, fetchActivity, fetchPluginVersion, runDoctor, runSync,
+  fetchConflictPolicy, fetchGames, fetchState, fetchVersion, fetchActivity, fetchPluginVersion,
+  fetchSyncStatus, runDoctor, runSync, setConflictPolicy,
   type ActivityDto, type ActivityLogEntry, type AgentResult, type AgentState, type AgentVersion,
-  type DoctorResult, type Outcome, type TrackedGame,
+  type ConflictPolicyKind, type ConflictPolicySetting, type DoctorResult, type Outcome,
+  type SyncStatus, type TrackedGame,
 } from './shared'
+import { openConflictResolveModal } from './conflicts'
 import { persistSyncOnOpen, resolvePullEnabled } from './gamingSync'
+import { saveLockerToast } from './toast'
+
+/** The three values verbatim (`ConflictPolicy` in `src/Shared/Contracts.cs`) — "Prefer this device"
+ * rather than a full machine picker, since a Decky settings row has no fleet-wide machine list to
+ * choose from (only the dashboard does); it always targets THIS device's own machine id. */
+const CONFLICT_POLICY_OPTIONS: { data: ConflictPolicyKind; label: string }[] = [
+  { data: 'Manual', label: 'Ask me every time' },
+  { data: 'NewestWins', label: 'Newest save always wins' },
+  { data: 'PreferMachine', label: 'Prefer this device' },
+]
 
 /**
  * The full-screen SaveLocker page — everything that was crowding the Quick Access panel (per-game
@@ -29,9 +42,11 @@ const fetchSyncOnOpenOverrides = callable<[], Record<string, boolean>>('gaming_s
  * own name, same as the old QAM picker did), and the pull-before-launch toggle — all inline, no
  * dropdown, so there's nothing here that depends on the QAM's own dropdown-remounts-the-panel quirk.
  */
-function GameRow({ game, syncOnOpenEnabled, onChanged, onSyncOnOpenChanged }: {
+function GameRow({ game, syncOnOpenEnabled, machineId, onChanged, onSyncOnOpenChanged }: {
   game: TrackedGame
   syncOnOpenEnabled: boolean
+  /** This device's own machine id (from `/api/state`), or null before this device has registered. */
+  machineId: string | null
   onChanged: () => void
   onSyncOnOpenChanged: (gameId: string, value: boolean) => void
 }) {
@@ -40,6 +55,47 @@ function GameRow({ game, syncOnOpenEnabled, onChanged, onSyncOnOpenChanged }: {
   const [busy, setBusy] = useState(false)
   const [pullBusy, setPullBusy] = useState(false)
   const [syncOnOpenBusy, setSyncOnOpenBusy] = useState(false)
+  const [policy, setPolicy] = useState<ConflictPolicySetting | null>(null)
+  const [policyBusy, setPolicyBusy] = useState(false)
+  const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null)
+  const [syncStatusBusy, setSyncStatusBusy] = useState(false)
+  const [syncStatusError, setSyncStatusError] = useState<string | null>(null)
+
+  useEffect(() => {
+    void fetchConflictPolicy(game.gameId).then((r) => { if (r.ok) setPolicy(r.data) })
+  }, [game.gameId])
+
+  // On demand only — plan.md Phase 12 is explicit that this must never run on a timer or a passive
+  // list refresh: the route hashes the whole save folder to answer, the same disk cost a push's own
+  // hash pays, so it only runs when this row's own button is pressed.
+  const checkSyncStatus = async () => {
+    setSyncStatusBusy(true)
+    setSyncStatusError(null)
+    try {
+      const r = await fetchSyncStatus(game.gameId)
+      if (r.ok) setSyncStatus(r.data)
+      else { setSyncStatus(null); setSyncStatusError(r.reason) }
+    } finally {
+      setSyncStatusBusy(false)
+    }
+  }
+
+  const changePolicy = async (next: ConflictPolicyKind) => {
+    if (next === 'PreferMachine' && machineId === null) {
+      // This device hasn't registered with the agent yet, so there is no machine id to prefer —
+      // persisting the policy anyway would silently set "Prefer this device" with no device recorded.
+      saveLockerToast('blocked', 'Cannot prefer this device yet', 'It has not registered with the agent')
+      return
+    }
+    setPolicyBusy(true)
+    try {
+      const preferredMachineId = next === 'PreferMachine' ? machineId : null
+      const r = await setConflictPolicy(game.gameId, next, preferredMachineId)
+      if (r.ok) setPolicy({ policy: next, preferredMachineId })
+    } finally {
+      setPolicyBusy(false)
+    }
+  }
 
   const effective = game.alias ?? game.name
   const pullEnabled = resolvePullEnabled(game)
@@ -183,6 +239,61 @@ function GameRow({ game, syncOnOpenEnabled, onChanged, onSyncOnOpenChanged }: {
           </DialogButton>
         </Focusable>
       )}
+      {!editing && (
+        <Focusable style={{ marginTop: '6px', maxWidth: '280px' }}>
+          <DropdownItem
+            label="If a save conflict happens"
+            rgOptions={CONFLICT_POLICY_OPTIONS}
+            selectedOption={policy?.policy ?? 'Manual'}
+            disabled={policyBusy}
+            onChange={(o: any) => {
+              const picked = o && typeof o === 'object' && 'data' in o ? o.data : o
+              void changePolicy(picked as ConflictPolicyKind)
+            }}
+          />
+          {/* This device can only ever set "prefer THIS device" (there is no fleet-wide machine
+              picker here) — if the dashboard or another device already set a DIFFERENT preferred
+              machine, say so rather than silently implying this dropdown already reflects that. */}
+          {policy?.policy === 'PreferMachine' && policy.preferredMachineId
+            && machineId !== null && policy.preferredMachineId !== machineId && (
+            <div style={{ fontSize: '10px', opacity: 0.6, marginTop: '2px' }}>
+              Currently prefers a different device — set from the dashboard.
+            </div>
+          )}
+        </Focusable>
+      )}
+      {!editing && (
+        <Focusable style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '8px' }}>
+          <DialogButton
+            disabled={syncStatusBusy}
+            onClick={() => void checkSyncStatus()}
+            style={{ width: 'auto', minWidth: 0, padding: '8px 14px', flexShrink: 0 }}
+          >
+            {syncStatusBusy ? 'Checking…' : 'Check sync status'}
+          </DialogButton>
+          {syncStatusError && (
+            <span style={{ fontSize: '12px', opacity: 0.7 }}>
+              {syncStatusError === 'no-agent' ? 'SaveLocker is not installed on this device.'
+                : syncStatusError === 'unreachable' ? 'The SaveLocker agent is not running.'
+                  : `Could not check (${syncStatusError}).`}
+            </span>
+          )}
+          {syncStatus && !syncStatusError && (
+            syncStatus.hasOpenConflict && syncStatus.conflictId ? (
+              <DialogButton
+                onClick={() => openConflictResolveModal(syncStatus.conflictId!)}
+                style={{ width: 'auto', minWidth: 0, padding: '8px 14px', flexShrink: 0 }}
+              >
+                Open conflict — resolve
+              </DialogButton>
+            ) : (
+              <span style={{ fontSize: '12px', opacity: 0.8 }}>
+                {syncStatus.inSync ? 'In sync with the cloud.' : 'Out of sync with the cloud.'}
+              </span>
+            )
+          )}
+        </Focusable>
+      )}
     </Focusable>
   )
 }
@@ -290,6 +401,7 @@ function OverviewTab() {
             key={g.gameId}
             game={g}
             syncOnOpenEnabled={syncOnOpenOverrides[g.gameId] ?? true}
+            machineId={state?.machineId ?? null}
             onChanged={() => void refresh()}
             onSyncOnOpenChanged={(gameId, value) => {
               // Optimistic, same reasoning as togglePull's onChanged(): don't wait out the next
@@ -508,6 +620,29 @@ const tabStabilityCss = `
   }
 `
 
+/**
+ * Bug 2: this route always opened scrolled partway down instead of at the top. `Tabs`'s own
+ * `autoFocusContents` (above) focuses something inside the freshly-mounted tab so the gamepad has an
+ * entry point, and Steam's gamepad navigation scrolls whatever holds focus into view — landing
+ * wherever that element happens to sit rather than at the page's own top. Rather than guess which
+ * Steam-owned ancestor is the actual scrolling element (its class names are build-hashed, and the
+ * `[class*="…"]` substrings above already show they can't be hardcoded), this walks every ancestor of
+ * the page root and zeroes `scrollTop` on whichever ones are actually scrollable.
+ *
+ * Run more than once: the focus-driven scroll this is correcting for happens asynchronously (after
+ * `autoFocusContents` settles, and again as each tab's own data fetch resolves and its content's
+ * height changes), so a single reset immediately on mount can be undone a frame or two later by the
+ * same thing this is working around.
+ */
+function resetFullPageScroll(): void {
+  const root = document.querySelector('.savelocker-fullpage')
+  let node: Element | null = root
+  while (node) {
+    if (node.scrollHeight > node.clientHeight) node.scrollTop = 0
+    node = node.parentElement
+  }
+}
+
 export function FullPage() {
   const [activeTab, setActiveTab] = useState('overview')
 
@@ -516,6 +651,13 @@ export function FullPage() {
     { id: 'diagnostics', title: 'Diagnostics', content: <Diagnostics /> },
     { id: 'launch', title: 'Launch options', content: <LaunchOptions /> },
   ]
+
+  useEffect(() => {
+    resetFullPageScroll()
+    const raf = requestAnimationFrame(resetFullPageScroll)
+    const timer = setTimeout(resetFullPageScroll, 300)
+    return () => { cancelAnimationFrame(raf); clearTimeout(timer) }
+  }, [])
 
   return (
     <div className="savelocker-fullpage" style={{ paddingTop: '48px', minHeight: '100%', boxSizing: 'border-box' }}>

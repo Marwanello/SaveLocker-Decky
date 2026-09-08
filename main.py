@@ -44,7 +44,7 @@ def _token() -> str | None:
         return None
 
 
-def _request(path: str, payload=None):
+def _request(path: str, payload=None, timeout: int = TIMEOUT):
     token = _token()
     if token is None:
         return {"ok": False, "reason": "no-agent"}
@@ -56,17 +56,44 @@ def _request(path: str, payload=None):
         request.add_header("Content-Type", "application/json")
 
     try:
-        with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
             raw = response.read().decode("utf-8")
         return {"ok": True, "data": json.loads(raw) if raw else None}
     except urllib.error.HTTPError as err:
         decky.logger.warning("SaveLocker agent returned HTTP %s for %s", err.code, path)
         return {"ok": False, "reason": f"http-{err.code}"}
-    except (urllib.error.URLError, TimeoutError, OSError):
+    except TimeoutError:
+        # A real timeout, not "no agent" — long-running routes (pre_launch_sync, sync_status) attach
+        # generous timeouts specifically because the underlying work can be slow but is still bounded,
+        # so this deserves its own reason rather than reading as "the agent is not running."
+        return {"ok": False, "reason": "timeout"}
+    except (urllib.error.URLError, OSError):
         # The daemon is not running. Expected on a Deck that has not started it yet.
         return {"ok": False, "reason": "unreachable"}
     except json.JSONDecodeError:
         return {"ok": False, "reason": "bad-response"}
+
+
+def _normalize_game(game: dict) -> dict:
+    """
+    `/api/games`'s `TrackedGameDto` keeps `id`/`path` as its wire field names deliberately, for
+    back-compat with older plugin installs (see `AgentApiServer.cs`'s doc comment on that DTO) — every
+    other agent DTO this plugin consumes calls the same concept `gameId`, which is what every TS
+    caller here (`fullPage.tsx`'s `TrackedGame`, `gamingSync.tsx`'s `GamingSyncGame`) actually reads.
+    Remapped once, here, rather than in TS.
+
+    Before this fix `game.gameId` was `undefined` for every game this call returned, which broke far
+    more than the alias editor: `fullPage.tsx`'s `set_alias`/`set_pull_before_launch`/conflict-policy
+    routes all sent `undefined` as the game id and 404'd silently, AND `gamingSync.tsx`'s
+    `resolveMatchSync` could never resolve a match even on its PRIMARY (AppID) path — it looks up a
+    row's `gameId` against `syncCache.games`, which was always empty for that key — so the library
+    page's Pull/Push/Sync buttons and status chip never mounted for any game at all, regardless of
+    whether the AppID or name matched.
+    """
+    out = dict(game)
+    out["gameId"] = out.pop("id", None)
+    out["saveDirectory"] = out.pop("path", None)
+    return out
 
 
 def _clean_env() -> dict:
@@ -94,6 +121,58 @@ def _clean_env() -> dict:
     else:
         env.pop("LD_LIBRARY_PATH", None)
     return env
+
+
+async def _process_tree(pid: int) -> list[str]:
+    """
+    `pid` itself plus every descendant (children, grandchildren, ...), walked breadth-first via
+    `ps --ppid` one level at a time — the same technique SDH-PauseGames
+    (github.com/popsUlfr/SDH-PauseGames, a mature, widely-used Decky plugin) uses to find every
+    process under a game's `reaper` wrapper.
+
+    `pid` is included, unlike that plugin's own approach of signalling only the reaper's children:
+    `gamingSync.tsx`'s `nInstanceID` (what callers pass here) is the `reaper`'s own PID for a
+    non-Steam shortcut, but the first CHILD's PID — i.e. the actual game process, not a wrapper — for
+    an ordinary Steam-store title (see `steam.d.ts`'s own doc comment on that field). Excluding `pid`
+    unconditionally left every childless Steam-store game with nothing to signal at all: an empty
+    descendant list read as "freeze failed," so `gamingSync.tsx` fell back to
+    `SteamClient.Apps.TerminateApp` — a hard kill — for exactly the common case this whole mechanism
+    exists to avoid. Including the reaper too, for the shortcut case, is harmless: it is paused and
+    resumed in lockstep with its children by every caller below, never signalled on its own.
+    """
+    pids: list[str] = [str(pid)]
+    frontier = [str(pid)]
+    while frontier:
+        parent = frontier.pop(0)
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "ps", "--ppid", parent, "-o", "pid=",
+                stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            )
+            stdout, _ = await proc.communicate()
+        except OSError:
+            continue
+        children = stdout.decode().split()
+        pids.extend(children)
+        frontier.extend(children)
+    return pids
+
+
+async def _signal_tree(pid: int, sig: str) -> bool:
+    """Sends `sig` (a `kill(1)` signal name, e.g. "-SIGSTOP") to `pid` and every descendant — see
+    `_process_tree`'s own doc comment for why `pid` itself is included. `kill`'s own exit code is what
+    actually tells success from failure now (e.g. `pid` has already exited on its own); a caller
+    acting on that distinction (`pause_process_tree`'s result decides whether `gamingSync.tsx` falls
+    back to `SteamClient.Apps.TerminateApp`) needs it to be accurate."""
+    pids = await _process_tree(pid)
+    if not pids:
+        return False
+    try:
+        proc = await asyncio.create_subprocess_exec("kill", sig, *pids)
+        await proc.wait()
+        return proc.returncode == 0
+    except OSError:
+        return False
 
 
 def _user_systemd_env() -> dict:
@@ -281,7 +360,10 @@ class Plugin:
 
     async def games(self):
         """Every game this machine tracks — not just the ones Steam launches."""
-        return _request("/api/games")
+        result = _request("/api/games")
+        if result["ok"] and result["data"] is not None:
+            result["data"] = [_normalize_game(g) for g in result["data"]]
+        return result
 
     async def set_alias(self, game_id: str, alias: str | None):
         """
@@ -397,6 +479,106 @@ class Plugin:
             "/api/launch-options/applied",
             {"steamAppId": steam_app_id, "applied": applied, "error": error},
         )
+
+    async def conflicts(self):
+        """Every open conflict this machine is a party to (never a bystander case)."""
+        return _request("/api/conflicts")
+
+    async def conflict(self, conflict_id: str):
+        return _request("/api/conflicts/%s" % conflict_id)
+
+    async def resolve_conflict(self, conflict_id: str, winning_version_id: str, keep_both: bool):
+        """
+        The caller names the WINNING version, not a side — it already has the conflict's
+        `versionAId`/`versionBId` from `conflicts()`/`conflict()` and knows which one is "this
+        device"'s. `keep_both` protects the loser as a downloadable backup instead of leaving it to
+        eventual retention pruning.
+        """
+        return _request(
+            "/api/conflicts/%s/resolve" % conflict_id,
+            {"winningVersionId": winning_version_id, "keepBoth": keep_both},
+        )
+
+    async def conflict_policy(self, game_id: str):
+        return _request("/api/games/%s/conflict-policy" % game_id)
+
+    async def set_conflict_policy(self, game_id: str, policy: str, preferred_machine_id: str | None):
+        return _request(
+            "/api/games/%s/conflict-policy" % game_id,
+            {"policy": policy, "preferredMachineId": preferred_machine_id},
+        )
+
+    async def save_version(self, version_id: str):
+        """Machine/timestamp/size for one side of a conflict — a conflict only carries version ids."""
+        return _request("/api/versions/%s" % version_id)
+
+    async def version_stats(self, version_id: str):
+        """File count and newest-file-write time for one side of a conflict, read from its archive."""
+        return _request("/api/versions/%s/stats" % version_id)
+
+    async def pre_launch_sync(self, game_id: str):
+        """
+        The Decky launch gate (tasks/conflict-resolution-ui/plan.md, Phase 11):
+        `gamingSync.tsx` cancels Steam's own launch pipeline the instant it starts, calls this, and
+        only re-triggers the launch once it returns. Wraps `SyncEngine.PrepareLaunchAsync` over HTTP
+        in-process on the daemon, rather than the `sync()` CLI call above, because a launch decision
+        needs a real decision back (Proceed / ProceedSyncPaused / Blocked with a conflict id), not
+        CLI prose to reclassify.
+
+        Same generous timeout as `sync()`: this performs a real push/pull round trip (commit-before-
+        choose), which a slow link or a big save can make genuinely slow — better to wait than to time
+        this out and let a stale save through the gate.
+
+        Run off-thread rather than calling `_request` directly: `_request` is a synchronous
+        `urllib.request.urlopen` call, and Decky Loader shares one asyncio event loop across every
+        installed plugin. A 5-second worst case there was tolerable; a 600-second one is not — it would
+        freeze every other plugin's async calls for as long as the agent takes to answer, not just this
+        one's, exactly the class of bug `sync()` above avoids by using an async subprocess instead.
+        """
+        return await asyncio.to_thread(_request, "/api/games/%s/pre-launch-sync" % game_id, {}, timeout=600)
+
+    async def sync_status(self, game_id: str):
+        """
+        On-demand "am I actually in sync right now" check (Phase 12 of
+        tasks/conflict-resolution-ui/plan.md) — `fullPage.tsx`'s "Check sync" button only, never a
+        poll. The route hashes the whole save folder to answer, the same disk cost a push's own hash
+        pays, so it must stay a one-shot, user-triggered call.
+
+        A longer-than-default timeout for the same reason `sync()` above needs one: hashing a large
+        save folder over local disk is usually fast but not bounded, and this should wait it out
+        rather than report a false timeout. Run off-thread for the same reason `pre_launch_sync` above
+        is: `_request` blocks synchronously, and this shared event loop cannot afford up to 60 seconds
+        of that on every other plugin's behalf.
+        """
+        return await asyncio.to_thread(_request, "/api/games/%s/sync-status" % game_id, timeout=60)
+
+    async def pause_process_tree(self, pid: int) -> bool:
+        """
+        Freezes (SIGSTOP) a launch's whole process tree, rooted at `pid` — `gamingSync.tsx`'s
+        `nInstanceID`, read off `RegisterForAppLifetimeNotifications` (the `reaper` PID for a
+        non-Steam shortcut, or the actual game process for an ordinary Steam-store title — see
+        `_process_tree`'s own doc comment for why both are included in what gets signalled).
+
+        The fallback for when a Blocked pre-launch-sync decision (tasks/conflict-resolution-ui/
+        plan.md, Phase 11) could not actually stop the launch: `SteamClient.Apps.CancelGameAction`
+        is undocumented and best-effort (steam.d.ts's own comment), and can lose the race entirely
+        for a non-Steam-shortcut launch. Freezing instead of killing outright means the process
+        stops touching the save file (the actual risk) without losing whatever it already has in
+        memory — `resume_process_tree` below can pick it back up exactly where it was.
+        """
+        return await _signal_tree(pid, "-SIGSTOP")
+
+    async def resume_process_tree(self, pid: int) -> bool:
+        """Un-freezes a tree `pause_process_tree` froze — the launch continues from exactly where
+        it was, in place of a fresh `SteamClient.Apps.RunGame` call that would otherwise race a
+        process that never actually stopped existing."""
+        return await _signal_tree(pid, "-SIGCONT")
+
+    async def kill_process_tree(self, pid: int) -> bool:
+        """Ends a tree `pause_process_tree` froze, for when the player backs out of the resolve
+        popup instead of playing — "decide later" means nothing keeps running, the same as if the
+        cancel this was a fallback for had actually worked."""
+        return await _signal_tree(pid, "-SIGKILL")
 
     async def _main(self):
         decky.logger.info("SaveLocker plugin loaded; agent state dir: %s", _state_dir())

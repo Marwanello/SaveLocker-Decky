@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { afterPatch, appDetailsClasses, createReactTreePatcher, findInReactTree, Focusable } from '@decky/ui'
 import { routerHook } from '@decky/api'
 import { FaCloudDownloadAlt, FaCloudUploadAlt, FaSyncAlt } from 'react-icons/fa'
@@ -6,6 +6,7 @@ import {
   reportSyncOutcome, resolveMatchFresh, resolveMatchSync, resolvePullEnabled,
   resolveSyncOnOpenEnabled, runPull, runSyncForGaming,
 } from './gamingSync'
+import { openConflictResolveModal, useOpenConflicts } from './conflicts'
 import { saveLockerToast, KIND_STYLE } from './toast'
 import {
   classifySyncOutput, markPageOpenPull, setChip, shouldRepullOnOpen, useSyncChip,
@@ -55,8 +56,10 @@ function ageSuffix(at: number): string {
 }
 
 /** The status/progress pill beside the buttons — same colored-circle language as `saveLockerToast`,
- * via the shared `KIND_STYLE` map, so the chip and the toast for the same event never disagree. */
-function SyncChip({ state }: { state: ChipState | null }) {
+ * via the shared `KIND_STYLE` map, so the chip and the toast for the same event never disagree.
+ * Clickable only in its 'conflict' state, straight into the resolve popup — every other state is
+ * read-only status, not an action. */
+function SyncChip({ state, onClick }: { state: ChipState | null; onClick?: () => void }) {
   // Re-renders on a slow tick purely so the relative age above stays honest on a page left open.
   const [, tick] = useState(0)
   useEffect(() => {
@@ -67,13 +70,16 @@ function SyncChip({ state }: { state: ChipState | null }) {
   if (!state) return null
   const { bg, fg, Icon } = KIND_STYLE[state.kind]
   const syncing = state.kind === 'syncing'
+  const clickable = state.kind === 'conflict' && onClick !== undefined
   return (
     <div
       title={state.reason}
+      onClick={clickable ? onClick : undefined}
       style={{
         display: 'flex', alignItems: 'center', gap: '6px', flexShrink: 0,
         background: bg, color: fg, borderRadius: '14px',
         padding: '6px 12px', fontSize: '13px', whiteSpace: 'nowrap',
+        cursor: clickable ? 'pointer' : 'default',
       }}
     >
       <Icon style={{ fontSize: '12px' }} />
@@ -104,6 +110,33 @@ function OverlayButtons({ appId, gameName }: { appId: number; gameName: string }
   // push had both just run. `useSyncChip` also subscribes, so a pull started from the Play button
   // (in `gamingSync.tsx`, which has no UI) updates this chip live.
   const chip = useSyncChip(appId)
+  // Which open conflict (if any) belongs to THIS game's own chip — `conflicts.tsx`'s chip-merge
+  // already painted the chip 'conflict' by gameId -> appId, so the reverse lookup here just needs
+  // this game's own id, which `resolveMatchSync` (synchronous, already-warm cache) already has.
+  const conflicts = useOpenConflicts()
+  const gameId = resolveMatchSync(appId)?.gameId
+  const conflict = gameId ? conflicts.find((c) => c.gameId === gameId) : undefined
+
+  /**
+   * Bug 1, point 5: if a conflict already exists when this page opens, surface the resolve popup
+   * right away rather than leaving it to a clickable chip the user might not notice. Gated on the
+   * SAME two settings as the page-open pull effect below it (pull-before-launch AND sync-on-open both
+   * on) — that pairing is what makes this page responsible for checking sync state on open at all;
+   * with either off, the existing clickable 'conflict' chip is the only affordance, matching Bug 1's
+   * settings matrix.
+   *
+   * `openedRef` guards against reopening on every 20s poll tick while the same conflict stays open
+   * and this page stays mounted — it should offer the popup once per page visit, not fight the user
+   * for attention every time `conflicts.tsx`'s poller re-fires with the same still-open conflict.
+   */
+  const openedRef = useRef(false)
+  useEffect(() => {
+    if (openedRef.current || !conflict) return
+    const match = resolveMatchSync(appId)
+    if (!match || !resolvePullEnabled(match) || !resolveSyncOnOpenEnabled(match.gameId)) return
+    openedRef.current = true
+    openConflictResolveModal(conflict.id)
+  }, [appId, conflict])
 
   // Polls `activity()` while a pull/push this component started is in flight, so the chip can show a
   // live percentage — only ever available for a push (the agent only reports byte progress on the
@@ -256,7 +289,7 @@ function OverlayButtons({ appId, gameName }: { appId: number; gameName: string }
         gap: '8px',
       }}
     >
-      <SyncChip state={chip} />
+      <SyncChip state={chip} onClick={conflict ? () => openConflictResolveModal(conflict.id) : undefined} />
       {icon('pull', FaCloudDownloadAlt, 'Pull save')}
       {icon('push', FaCloudUploadAlt, 'Push save')}
       {icon('sync', FaSyncAlt, 'Sync save')}
