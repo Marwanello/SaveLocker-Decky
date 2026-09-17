@@ -7,7 +7,7 @@
     "tags": ["saves", "sync", "utility"],
     "image_url": "https://opengraph.githubassets.com/1/Marwanello/SaveLocker-Decky",
     "versions": [
-      { "name": "0.2.3", "hash": "545439dc7f4ab2abd2296b3afbd7c79a4e0131cfd2b7008cd04f75fc08b4bbdb", "artifact": "https://github.com/Marwanello/SaveLocker-Decky/releases/download/v0.2.3/SaveLocker.zip" }
+      { "name": "0.2.4", "hash": "fd5110dae031bab5d2159d0f577f63dd5117096599d52f8506bfd6170a0c6642", "artifact": "https://github.com/Marwanello/SaveLocker-Decky/releases/download/v0.2.4/SaveLocker.zip" }
     ]
   }
 ]
