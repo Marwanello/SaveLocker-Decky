@@ -537,6 +537,15 @@ class Plugin:
         """
         return await asyncio.to_thread(_request, "/api/games/%s/pre-launch-sync" % game_id, {}, timeout=600)
 
+    async def launch_answer(self, game_id: str, question_id: str, choice: str, remember: bool):
+        """
+        The other half of an `Ask` from `pre_launch_sync` (SaveLocker tasks/emulator-saves Phase 5c): the agent
+        already applied the question's default, so this is only called for another choice (or "don't ask again"),
+        and the launch continues whatever it returns. Off-thread for the same shared-event-loop reason as above.
+        """
+        payload = {"questionId": question_id, "choice": choice, "remember": bool(remember)}
+        return await asyncio.to_thread(_request, "/api/games/%s/launch-answer" % game_id, payload, timeout=15)
+
     async def sync_status(self, game_id: str):
         """
         On-demand "am I actually in sync right now" check (Phase 12 of

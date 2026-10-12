@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { PanelSection, PanelSectionRow, ToggleField } from '@decky/ui'
 import { callable } from '@decky/api'
 import { saveLockerToast } from './toast'
+import { askLaunchQuestion, type LaunchQuestion } from './launchQuestion'
 import {
   classifySyncOutput, outcomeChip, pageOpenPullIsFresh, setChip,
 } from './syncStatus'
@@ -53,10 +54,12 @@ interface GamingSyncGame {
  * gate itself (tasks/conflict-resolution-ui/plan.md, Phase 11). Field names/values match the C#
  * `LaunchGateResult`/`LaunchDecision` verbatim; nothing here reshapes them. */
 export interface PreLaunchSyncResult {
-  decision: 'Proceed' | 'ProceedSyncPaused' | 'Blocked'
+  decision: 'Proceed' | 'ProceedSyncPaused' | 'Blocked' | 'Ask'
   reason: string | null
   conflictId: string | null
   holderMachineName: string | null
+  /** Set with `Ask` (SaveLocker tasks/emulator-saves Phase 5c): its default is already applied by the agent. */
+  question?: LaunchQuestion | null
 }
 
 export type Result<T> = { ok: true; data: T } | { ok: false; reason: string }
@@ -447,7 +450,20 @@ function handlePreLaunchResult(
     return
   }
 
-  if (decision === 'ProceedSyncPaused') {
+  if (decision === 'Ask' && r.data.question) {
+    // The agent already applied the question's default, so the launch is safe as it stands; hold it only while the
+    // player picks. Same hold as Blocked (`pendingBlock` freezes a launch whose cancel lost the race), and the same
+    // `continueLaunch` afterwards — but every way out of the question continues the launch, none cancels it.
+    pendingBlock.add(appId)
+    setChip(appId, { kind: 'syncing', text: 'Your choice…', pct: null, at: Date.now() })
+    void askLaunchQuestion(match.gameId, match.name, r.data.question).then(() => {
+      setChip(appId, { kind: 'success', text: 'Synced', pct: null, at: Date.now() })
+      void continueLaunch(appId, appIdStr, launchSource, match.name)
+    })
+    return
+  }
+
+  if (decision === 'ProceedSyncPaused') {
     setChip(appId, { kind: 'blocked', text: 'Launched unsynced', pct: null, reason: reason ?? undefined, at: Date.now() })
     if (!quiet && holderMachineName) {
       saveLockerToast('blocked', `${match.name} launched without pulling`, `saves are checked out by ${holderMachineName}`)
@@ -742,7 +758,11 @@ async function handleLifetimeChange(data: SaveLockerAppLifetimeNotification): Pr
       }
       return
     }
-    const paused = r.data.decision === 'ProceedSyncPaused'
+    if (r.data.decision === 'Ask' && !syncOnOpen) {
+      // Already running: too late to ask, and the agent applied the default before it answered.
+      saveLockerToast('info', `${match.name}`, r.data.reason ?? 'Started with its saves’ profile')
+    }
+    const paused = r.data.decision === 'ProceedSyncPaused'
     setChip(data.unAppID, {
       kind: paused ? 'blocked' : 'success',
       text: paused ? 'Launched unsynced' : 'Synced',
