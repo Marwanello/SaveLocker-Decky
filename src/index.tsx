@@ -13,6 +13,7 @@ import {
   unregisterConflictPolling, useOpenConflicts,
 } from './conflicts'
 import { FullPage, SAVELOCKER_PAGE_ROUTE } from './fullPage'
+import { DlcHolds } from './dlcHolds'
 import {
   ReadOnlyRow, applyAll, fetchActivity, fetchGames, fetchState, fetchVersion, runSync,
   type ActivityDto, type AgentResult, type AgentState, type AgentVersion, type Conflict, type TrackedGame,
@@ -645,6 +646,7 @@ function Content() {
     <>
     <ConflictWarnings conflicts={conflicts} games={games} onOpen={openConflictResolveModal} />
     <LeaseWarnings warnings={state?.leaseWarnings ?? []} onDismiss={(g) => void dismiss(g)} />
+    <DlcHolds />
     <Status state={state} version={version} />
     <Progress activity={activity} />
     <StagedUpdate version={version} onSettled={() => void refreshStatus()} />
