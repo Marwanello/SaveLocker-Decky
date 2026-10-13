@@ -537,6 +537,29 @@ class Plugin:
         """
         return await asyncio.to_thread(_request, "/api/games/%s/pre-launch-sync" % game_id, {}, timeout=600)
 
+    async def launch_answer(self, game_id: str, question_id: str, choice: str, remember: bool):
+        """
+        The other half of an `Ask` from `pre_launch_sync` (SaveLocker tasks/emulator-saves Phase 5c): the agent
+        already applied the question's default, so this is only called for another choice (or "don't ask again"),
+        and the launch continues whatever it returns. Off-thread for the same shared-event-loop reason as above.
+        """
+        payload = {"questionId": question_id, "choice": choice, "remember": bool(remember)}
+        return await asyncio.to_thread(_request, "/api/games/%s/launch-answer" % game_id, payload, timeout=15)
+
+    async def dlc_holds(self):
+        """Pulls the agent's DLC check is holding (SaveLocker tasks/emulator-saves Phase 5c), for the QAM's
+        "Waiting for DLC" section. A small read of a file beside the agent's config."""
+        return await asyncio.to_thread(_request, "/api/dlc/holds")
+
+    async def dlc_handover(self, game_id: str):
+        """Ask the machine the latest save came from to hand over the packs missing here. The agent fetches and
+        installs them once sent, and the held pull goes ahead by itself."""
+        return await asyncio.to_thread(_request, "/api/games/%s/dlc/handover" % game_id, {}, timeout=30)
+
+    async def dlc_pull_anyway(self, game_id: str):
+        """Restore the latest save without the DLC it was made with. A pull, so the same long timeout as sync()."""
+        return await asyncio.to_thread(_request, "/api/games/%s/dlc/pull-anyway" % game_id, {}, timeout=300)
+
     async def sync_status(self, game_id: str):
         """
         On-demand "am I actually in sync right now" check (Phase 12 of

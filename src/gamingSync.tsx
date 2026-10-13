@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { PanelSection, PanelSectionRow, ToggleField } from '@decky/ui'
 import { callable } from '@decky/api'
 import { saveLockerToast } from './toast'
+import { askLaunchQuestion, type LaunchQuestion } from './launchQuestion'
 import {
   classifySyncOutput, outcomeChip, pageOpenPullIsFresh, setChip,
 } from './syncStatus'
@@ -53,10 +54,12 @@ interface GamingSyncGame {
  * gate itself (tasks/conflict-resolution-ui/plan.md, Phase 11). Field names/values match the C#
  * `LaunchGateResult`/`LaunchDecision` verbatim; nothing here reshapes them. */
 export interface PreLaunchSyncResult {
-  decision: 'Proceed' | 'ProceedSyncPaused' | 'Blocked'
+  decision: 'Proceed' | 'ProceedSyncPaused' | 'Blocked' | 'Ask'
   reason: string | null
   conflictId: string | null
   holderMachineName: string | null
+  /** Set with `Ask` (SaveLocker tasks/emulator-saves Phase 5c): its default is already applied by the agent. */
+  question?: LaunchQuestion | null
 }
 
 export type Result<T> = { ok: true; data: T } | { ok: false; reason: string }
@@ -305,6 +308,13 @@ const selfRelaunching = new Set<number>()
 // `GetActiveGameActions` can't give after the fact, so it's what resolves this flag one way or the
 // other: consumed there either way, whether or not the process turns out to be genuinely running.
 const pendingBlock = new Set<number>()
+// appId -> a launch question is on screen for this launch (SaveLocker tasks/emulator-saves Phase 5c). Unlike
+// `pendingBlock`, nothing is wrong with the launch — the agent already applied the default — so a launch whose cancel
+// lost the race is left running, never frozen or killed: it is only noted in `askRaced`, so that settling the question
+// does not start the game a second time, and a different choice is said to apply from the next launch (Xenia read its
+// config when it started).
+const pendingAsk = new Set<number>()
+const askRaced = new Set<number>()
 // appId -> the reaper PID `pause_process_tree` (main.py) froze, once `handleLifetimeChange` confirms
 // `pendingBlock` was wrong to believe the launch never happened. Freezing rather than killing outright
 // (SDH-PauseGames' own SIGSTOP/SIGCONT-a-process-tree technique — github.com/popsUlfr/SDH-PauseGames)
@@ -447,10 +457,31 @@ function handlePreLaunchResult(
     return
   }
 
+  if (decision === 'Ask' && r.data.question) {
+    // The agent already applied the question's default, so the launch is safe as it stands; hold it only while the
+    // player picks, then relaunch — every way out of the question continues the launch, none cancels it. Not
+    // `pendingBlock`: a launch that raced past the cancel is left running (see `pendingAsk`), never frozen as a conflict.
+    pendingAsk.add(appId)
+    setChip(appId, { kind: 'syncing', text: 'Your choice…', pct: null, at: Date.now() })
+    void askLaunchQuestion(match.gameId, match.name, r.data.question).then((changed) => {
+      pendingAsk.delete(appId)
+      setChip(appId, { kind: 'success', text: 'Synced', pct: null, at: Date.now() })
+      if (askRaced.delete(appId)) {
+        if (changed) saveLockerToast('info', `${match.name} had already started`, 'Your choice applies from its next launch')
+        return
+      }
+      void continueLaunch(appId, appIdStr, launchSource, match.name)
+    })
+    return
+  }
+
   if (decision === 'ProceedSyncPaused') {
     setChip(appId, { kind: 'blocked', text: 'Launched unsynced', pct: null, reason: reason ?? undefined, at: Date.now() })
     if (!quiet && holderMachineName) {
       saveLockerToast('blocked', `${match.name} launched without pulling`, `saves are checked out by ${holderMachineName}`)
+    } else if (!quiet && reason) {
+      // Not a lease: the agent says why it did not pull (a newer save that needs DLC this Deck lacks).
+      saveLockerToast('blocked', `${match.name} launched with this Deck's save`, reason)
     }
   } else {
     setChip(appId, { kind: 'success', text: 'Synced', pct: null, at: Date.now() })
@@ -670,6 +701,8 @@ async function handleLifetimeChange(data: SaveLockerAppLifetimeNotification): Pr
       await freezeOrTerminate(data.unAppID, data.nInstanceID, match.name)
       return
     }
+    // A launch question's launch raced past its cancel: it runs on, tracked as a normal launch.
+    if (pendingAsk.has(data.unAppID)) askRaced.add(data.unAppID)
 
     trackedLaunches.set(data.unAppID, { name: match.name, pid: data.nInstanceID })
 
@@ -741,6 +774,12 @@ async function handleLifetimeChange(data: SaveLockerAppLifetimeNotification): Pr
         saveLockerToast('blocked', `${match.name} — save conflict`, 'Resolve it in the plugin')
       }
       return
+    }
+    if (r.data.decision === 'Ask' && !syncOnOpen) {
+      // Already running: too late to ask, and the agent applied the default before it answered — which this Xenia may
+      // have started too early to read, so say when it counts.
+      saveLockerToast('info', `${match.name}`,
+        `${r.data.reason ?? 'Xenia was set to the profile its saves are under.'} If Xenia had already started, that applies from its next launch.`)
     }
     const paused = r.data.decision === 'ProceedSyncPaused'
     setChip(data.unAppID, {
