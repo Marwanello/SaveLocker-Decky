@@ -1,0 +1,3 @@
+# Every text file is stored with LF, whatever the checkout's editor writes: a whole file committed with CRLF turns a
+# 20-line change into a 1,700-line diff and breaks blame (launch-questions, 2026-10-13).
+* text=auto eol=lf

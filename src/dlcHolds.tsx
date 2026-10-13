@@ -62,7 +62,8 @@ export function DlcHolds() {
 
   return (
     <PanelSection title="Waiting for DLC">
-      {holds.map((h) => (
+      {/* Each game's line and its two buttons together, so with several holds a button sits under its own game. */}
+      {holds.flatMap((h) => [
         <PanelSectionRow key={h.gameId}>
           <ReadOnlyRow>
             <div style={{ fontSize: '0.85em' }}><b>{h.gameName}</b></div>
@@ -70,22 +71,18 @@ export function DlcHolds() {
               The newer save needs {h.summary}. This Deck's save is kept; the pull goes ahead once they're installed.
             </div>
           </ReadOnlyRow>
-        </PanelSectionRow>
-      ))}
-      {holds.map((h) => (
+        </PanelSectionRow>,
         <PanelSectionRow key={`handover-${h.gameId}`}>
           <ButtonItem layout="below" disabled={busy} onClick={() => void handOver(h)}>
             Get {h.gameName}'s DLC from the other machine
           </ButtonItem>
-        </PanelSectionRow>
-      ))}
-      {holds.map((h) => (
+        </PanelSectionRow>,
         <PanelSectionRow key={`anyway-${h.gameId}`}>
           <ButtonItem layout="below" disabled={busy} onClick={() => void pullAnyway(h)}>
             Pull {h.gameName} anyway
           </ButtonItem>
-        </PanelSectionRow>
-      ))}
+        </PanelSectionRow>,
+      ])}
     </PanelSection>
   )
 }

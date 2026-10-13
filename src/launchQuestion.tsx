@@ -31,12 +31,13 @@ const launchAnswer = callable<[string, string, string, boolean], Result<unknown>
 
 /**
  * Shows the question over Game Mode and resolves once it is settled: a choice was sent (or the default kept), the
- * countdown ran out, or the modal was closed. Never rejects — the launch it is holding must always continue.
+ * countdown ran out, or the modal was closed. Resolves `true` only when a choice other than the default reached the
+ * agent. Never rejects — the launch it is holding must always continue.
  */
-export function askLaunchQuestion(gameId: string, gameName: string, question: LaunchQuestion): Promise<void> {
+export function askLaunchQuestion(gameId: string, gameName: string, question: LaunchQuestion): Promise<boolean> {
   return new Promise((resolve) => {
     let settled = false
-    const done = () => { if (!settled) { settled = true; resolve() } }
+    const done = (changed: boolean) => { if (!settled) { settled = true; resolve(changed) } }
     showModal(<LaunchQuestionModal gameId={gameId} gameName={gameName} question={question} onDone={done} />)
   })
 }
@@ -45,7 +46,7 @@ function LaunchQuestionModal({ gameId, gameName, question, onDone, closeModal }:
   gameId: string
   gameName: string
   question: LaunchQuestion
-  onDone: () => void
+  onDone: (changed: boolean) => void
   closeModal?: () => void
 }) {
   const [left, setLeft] = useState(Math.max(5, question.timeoutSeconds))
@@ -53,11 +54,11 @@ function LaunchQuestionModal({ gameId, gameName, question, onDone, closeModal }:
   const [sending, setSending] = useState(false)
   const finished = useRef(false)
 
-  const finish = () => {
+  const finish = (changed = false) => {
     if (finished.current) return
     finished.current = true
     closeModal?.()
-    onDone()
+    onDone(changed)
   }
 
   useEffect(() => {
@@ -65,7 +66,7 @@ function LaunchQuestionModal({ gameId, gameName, question, onDone, closeModal }:
     return () => {
       clearInterval(tick)
       // Closed by B or by Steam: the default is already in place, so the launch simply goes on.
-      if (!finished.current) { finished.current = true; onDone() }
+      if (!finished.current) { finished.current = true; onDone(false) }
     }
   }, [])
 
@@ -76,12 +77,13 @@ function LaunchQuestionModal({ gameId, gameName, question, onDone, closeModal }:
     if (choice.id === question.defaultChoice && !remember) { finish(); return }
     setSending(true)
     const r = await launchAnswer(gameId, question.id, choice.id, remember).catch(() => null)
-    if (!r || !r.ok) saveLockerToast('blocked', `${gameName}: your choice didn't reach SaveLocker`, 'Starting with the default instead')
-    finish()
+    const reached = !!r && r.ok
+    if (!reached) saveLockerToast('blocked', `${gameName}: your choice didn't reach SaveLocker`, 'Starting with the default instead')
+    finish(reached && choice.id !== question.defaultChoice)
   }
 
   return (
-    <ModalRoot closeModal={finish} onCancel={finish} bDisableBackgroundDismiss>
+    <ModalRoot closeModal={() => finish()} onCancel={() => finish()} bDisableBackgroundDismiss>
       <div style={{ padding: '20px', maxWidth: '560px' }}>
         <div style={{ fontSize: '11px', letterSpacing: '0.12em', textTransform: 'uppercase', opacity: 0.6 }}>
           SaveLocker · before {gameName} starts
