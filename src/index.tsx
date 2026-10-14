@@ -14,6 +14,7 @@ import {
 } from './conflicts'
 import { FullPage, SAVELOCKER_PAGE_ROUTE } from './fullPage'
 import { DlcHolds } from './dlcHolds'
+import { installStagedUpdate } from './stagedUpdate'
 import {
   ReadOnlyRow, applyAll, fetchActivity, fetchGames, fetchState, fetchVersion, runSync,
   type ActivityDto, type AgentResult, type AgentState, type AgentVersion, type Conflict, type TrackedGame,
@@ -37,7 +38,6 @@ import {
  */
 
 const dismissWarning = callable<[string], AgentResult<null>>('dismiss_warning')
-const restartAgent = callable<[], AgentResult<null>>('restart_agent')
 
 /**
  * "Your other machine has this game checked out."
@@ -168,9 +168,12 @@ function Status({ state, version }: { state: AgentState | null; version: AgentVe
  * that can fail; this one is a file copy the agent has already verified, so pressing the button is
  * the last step rather than the first.
  *
- * The button destroys the API this panel is talking to. That is not a hazard to work around — it is
- * how the update installs — so `unreachable` during the wait is the expected shape of SUCCESS, and
- * anything that error-toasts on the first failed call reports a working update as a failure.
+ * The wait itself — restart, then poll until the staged marker is gone rather than trusting any
+ * version string — lives in `stagedUpdate.tsx`, shared with the full-screen page's Status section
+ * so the two surfaces cannot disagree about what success looks like. The button destroys the API
+ * this panel is talking to, which is not a hazard to work around — it is how the update installs —
+ * so `unreachable` during the wait is the expected shape of SUCCESS, and anything that
+ * error-toasts on the first failed call reports a working update as a failure.
  */
 function StagedUpdate({ version, onSettled }: {
   version: AgentVersion | null
@@ -193,38 +196,7 @@ function StagedUpdate({ version, onSettled }: {
     setBusy(true)
     setOutcome(null)
     try {
-      const restarted = await restartAgent()
-      if (!restarted.ok) {
-        setOutcome({ ok: false, text: describeRestartFailure(restarted.reason) })
-        return
-      }
-
-      // systemctl returns once the unit is active, but the agent's HTTP listener comes up a moment
-      // after that, so the first few polls legitimately fail. Success is not a version string match
-      // — the agent prints Major.Minor.Patch and the server's string need not agree on component
-      // count — it is the staged marker being GONE, which only happens once the swap ran.
-      const deadline = Date.now() + 120_000
-      while (Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, 2000))
-        const v = await fetchVersion()
-        if (!v.ok) continue
-
-        if (v.data.stagedVersion === null) {
-          setOutcome(v.data.currentVersion === before
-            // Applied, and the agent came back on the version it started on. The updater rolls a
-            // version back by itself when it will not start, so this is what that looks like from
-            // here — and saying "installed" would be a lie the user finds out about later.
-            ? { ok: false, text: `The agent restarted but is still on v${before}. Run doctor.` }
-            : { ok: true, text: `Installed. Now running v${v.data.currentVersion}.` })
-          return
-        }
-        // Still staged after a restart means the apply declined, and the agent knows why.
-        if (v.data.stagedBlockedReason) {
-          setOutcome({ ok: false, text: v.data.stagedBlockedReason })
-          return
-        }
-      }
-      setOutcome({ ok: false, text: 'The agent did not come back within two minutes. Run doctor.' })
+      setOutcome(await installStagedUpdate(before))
     } finally {
       setBusy(false)
       onSettled()
@@ -267,31 +239,6 @@ function StagedUpdate({ version, onSettled }: {
       )}
     </PanelSection>
   )
-}
-
-/**
- * systemctl's failure, in words a Deck owner can act on.
- *
- * The two that matter are named because they are not the same problem: no bus means this plugin's
- * backend has no user session to talk to (and the agent is fine), while a missing unit means the
- * agent was never installed through `install.sh`. Anything else is passed through verbatim rather
- * than flattened into "it failed" — systemctl's own text is the only real diagnostic there is.
- *
- * The missing-unit test is anchored to the unit's own name, not to a bare "not found". A loose match
- * told a Deck whose service was present, enabled and RUNNING that it had never been installed,
- * because the dynamic linker had failed systemctl with `version 'OPENSSL_3.4.0' not found` — a
- * sentence carrying those two words and meaning nothing like it. Advice this confident is earned.
- */
-function describeRestartFailure(reason: string): string {
-  if (reason === 'timeout') return 'The restart did not finish within two minutes. Run doctor.'
-  if (reason === 'exec-failed') return 'systemctl is not available on this device.'
-  if (reason.includes('connect to bus'))
-    return 'Could not reach this user\'s systemd. Restart your device to install the update.'
-  if (reason.includes('savelocker.service not found') ||
-      reason.includes('savelocker.service not loaded'))
-    return 'savelocker.service is not installed, so there is nothing to restart. '
-      + 'Restart your device, or run install.sh from Desktop mode.'
-  return `Could not restart the agent: ${reason}`
 }
 
 /**

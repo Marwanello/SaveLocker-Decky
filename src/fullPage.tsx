@@ -1,54 +1,391 @@
 import { useEffect, useState } from 'react'
 import {
-  DialogButton, DropdownItem, Focusable, PanelSection, PanelSectionRow, Tabs, TextField, ToggleField,
+  DialogButton, DropdownItem, Field, Focusable, ModalRoot, SidebarNavigation, TextField, ToggleField,
+  showModal,
 } from '@decky/ui'
 import { callable } from '@decky/api'
+import { FaGamepad, FaHistory, FaRocket, FaShieldAlt, FaStethoscope } from 'react-icons/fa'
 import {
-  ReadOnlyRow, applyAll, shortState, summarise, timeAgo,
-  fetchConflictPolicy, fetchGames, fetchState, fetchVersion, fetchActivity, fetchPluginVersion,
-  fetchSyncStatus, runDoctor, runSync, setConflictPolicy,
+  applyAll, fetchActivity, fetchConflictPolicy, fetchGames, fetchPluginVersion, fetchState, fetchSyncStatus,
+  fetchVersion, runDoctor, runSync, setConflictPolicy, shortState, summarise, timeAgo,
   type ActivityDto, type ActivityLogEntry, type AgentResult, type AgentState, type AgentVersion,
-  type ConflictPolicyKind, type ConflictPolicySetting, type DoctorResult, type Outcome,
-  type SyncStatus, type TrackedGame,
+  type ConflictPolicyKind, type ConflictPolicySetting, type DoctorResult, type Outcome, type SyncStatus,
+  type TrackedGame,
 } from './shared'
-import { openConflictResolveModal } from './conflicts'
+import { openConflictResolveModal, useOpenConflicts } from './conflicts'
 import { persistSyncOnOpen, resolvePullEnabled } from './gamingSync'
-import { saveLockerToast } from './toast'
-
-/** The three values verbatim (`ConflictPolicy` in `src/Shared/Contracts.cs`) — "Prefer this device"
- * rather than a full machine picker, since a Decky settings row has no fleet-wide machine list to
- * choose from (only the dashboard does); it always targets THIS device's own machine id. */
-const CONFLICT_POLICY_OPTIONS: { data: ConflictPolicyKind; label: string }[] = [
-  { data: 'Manual', label: 'Ask me every time' },
-  { data: 'NewestWins', label: 'Newest save always wins' },
-  { data: 'PreferMachine', label: 'Prefer this device' },
-]
+import { classifySyncOutput } from './syncStatus'
+import { installStagedUpdate } from './stagedUpdate'
+import { DlcHolds } from './dlcHolds'
+import { KIND_STYLE, saveLockerToast, type ToastKind } from './toast'
 
 /**
  * The full-screen SaveLocker page — everything that was crowding the Quick Access panel (per-game
  * alias/pull settings, the full activity history, doctor's raw output, the launch-options detail
- * list) moved here instead, reachable from the QAM's own "Settings" button (index.tsx's
+ * list) lives here instead, reachable from the QAM's own "Settings" button (index.tsx's
  * `openSettings`). Registered via `routerHook.addRoute` in index.tsx's `definePlugin`, not here —
  * the route belongs to the plugin's lifetime, not to this component's.
+ *
+ * The chrome is Valve's own paged-settings component (`SidebarNavigation` in @decky/ui is Steam's
+ * PagedSettingsDialog resolved at runtime): title plus page list on the left, one content pane on
+ * the right, icons and focus behaviour included. That replaced an earlier Decky `Tabs` layout and
+ * with it two workarounds that no longer apply — a CSS block that killed the tab row's scroll
+ * transition (which glitched as the row animated under freshly-mounted content) and the
+ * `autoFocusContents` entry point (whose focus-driven scroll is why a scroll-reset shim exists
+ * below, kept as a harmless safety net for Steam's own route-entry focus restoration).
+ *
+ * Per-game configuration is a dialog here, opened from a game's row, rather than the dense
+ * five-control stacks the old list rendered inline; the row itself carries only what is needed to
+ * find the game, and the dialog is where the settings live.
  */
 export const SAVELOCKER_PAGE_ROUTE = '/savelocker'
 
 const setAlias = callable<[string, string | null], AgentResult<null>>('set_alias')
 const persistPullBeforeLaunch = callable<[string, boolean | null], AgentResult<null>>('set_pull_before_launch')
 const fetchSyncOnOpenOverrides = callable<[], Record<string, boolean>>('gaming_sync_on_open_overrides')
+const dismissWarning = callable<[string], AgentResult<null>>('dismiss_warning')
+
+/** The three values verbatim (`ConflictPolicy` in `src/Shared/Contracts.cs`) — "Prefer this device"
+ * rather than a full machine picker, since a settings row has no fleet-wide machine list to choose
+ * from (only the dashboard does); it always targets THIS device's own machine id. */
+const CONFLICT_POLICY_OPTIONS: { data: ConflictPolicyKind; label: string }[] = [
+  { data: 'Manual', label: 'Ask me every time' },
+  { data: 'NewestWins', label: 'Newest save always wins' },
+  { data: 'PreferMachine', label: 'Prefer this device' },
+]
+
+const DIM = { fontSize: '13px', opacity: 0.7 } as const
+const SMALL_BUTTON = { width: 'auto', minWidth: 0, padding: '8px 14px', flexShrink: 0 } as const
+
+/** One full-width section with the gamepad's uppercase header — same title treatment the QAM's
+ * PanelSection uses (16px/600, half-white), because this page and the panel are one visual
+ * language and drifting them apart would make the plugin feel like two plugins. */
+function Section({ title, children }: { title: string; children: React.ReactNode }) {
+  return (
+    <div style={{ marginBottom: '28px' }}>
+      <div style={{
+        fontSize: '16px', fontWeight: 600, letterSpacing: '0.5px', textTransform: 'uppercase',
+        color: 'rgba(255,255,255,0.7)', paddingBottom: '8px',
+      }}
+      >
+        {title}
+      </div>
+      {children}
+    </div>
+  )
+}
+
+/** A small status chip. Colours come from `toast.tsx`'s KIND_STYLE so a chip, the toast it
+ * corresponds to, and the QAM's attention rows all say the same thing the same way. */
+function Chip({ kind, children }: { kind: ToastKind; children: React.ReactNode }) {
+  const { bg, fg } = KIND_STYLE[kind]
+  return (
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', fontSize: '11px', fontWeight: 700,
+      letterSpacing: '0.5px', textTransform: 'uppercase', padding: '2px 8px', borderRadius: '10px',
+      background: bg, color: fg, whiteSpace: 'nowrap',
+    }}
+    >
+      {children}
+    </span>
+  )
+}
+
+/** One stat tile in the Status page's overview strip. */
+function Tile({ label, value }: { label: string; value: string }) {
+  return (
+    <div style={{ background: 'rgba(255,255,255,0.05)', borderRadius: '2px', padding: '12px 14px' }}>
+      <div style={{ fontSize: '11px', letterSpacing: '0.5px', textTransform: 'uppercase', color: 'rgba(255,255,255,0.4)' }}>
+        {label}
+      </div>
+      <div style={{ fontSize: '18px', color: '#fff', marginTop: '3px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+        {value}
+      </div>
+    </div>
+  )
+}
 
 /**
- * One game's row in the Overview tab's list: name, the effective alias (defaulting to the game's
- * own name, same as the old QAM picker did), and the pull-before-launch toggle — all inline, no
- * dropdown, so there's nothing here that depends on the QAM's own dropdown-remounts-the-panel quirk.
+ * "Install update now", the full-page half of the QAM's own StagedUpdate.
+ *
+ * Both surfaces can install now — the staging this row exists for is a file copy the agent has
+ * already verified, so the row offers the last step wherever the notice is being read instead of
+ * sending the user to the panel. Only ever offered for `stagedVersion` (a merely-available update
+ * needs a network round trip that can fail; this one cannot), and a blocked install shows the
+ * agent's own reason instead of a button whose whole story is "nothing happened".
+ *
+ * The install itself (restart + poll until the staged marker is gone) lives in `stagedUpdate.tsx`
+ * so this row and the QAM section cannot drift apart on what "success" means.
  */
-function GameRow({ game, syncOnOpenEnabled, machineId, onChanged, onSyncOnOpenChanged }: {
+function StagedUpdateRow({ version, onSettled }: { version: AgentVersion; onSettled: () => void }) {
+  const [busy, setBusy] = useState(false)
+  const [outcome, setOutcome] = useState<{ ok: boolean; text: string } | null>(null)
+
+  const staged = version.stagedVersion ?? null
+  const blocked = version.stagedBlockedReason ?? null
+  if (!staged && !outcome) return null
+
+  const install = async () => {
+    setBusy(true)
+    setOutcome(null)
+    try {
+      setOutcome(await installStagedUpdate(version.currentVersion))
+    } finally {
+      setBusy(false)
+      onSettled()
+    }
+  }
+
+  return (
+    <Field
+      label={staged ? `v${staged} is downloaded and verified` : 'Update'}
+      description={
+        busy ? 'Installing — the agent restarts, no game is affected.'
+          : blocked ?? outcome?.text ?? 'Installing takes a few seconds and restarts the agent. No game is affected.'
+      }
+      bottomSeparator="standard"
+      childrenLayout="inline"
+      childrenContainerWidth="min"
+    >
+      {staged && !blocked && (
+        <DialogButton disabled={busy} onClick={() => void install()} style={SMALL_BUTTON}>
+          {busy ? 'Installing…' : `Install v${staged} now`}
+        </DialogButton>
+      )}
+    </Field>
+  )
+}
+
+/**
+ * Status — the page the route opens on.
+ *
+ * Answer order is the point: is this Deck healthy (tiles), is there an update, does anything need
+ * a decision (conflicts, leases, DLC holds), and only then the one heavy action (sync everything).
+ * The tiles poll at the QAM's own 30-second rhythm scaled up: five seconds is what the old page
+ * used and `lastSyncAgo` is the one value a coarser clock visibly lies about.
+ */
+function StatusPage() {
+  const [state, setState] = useState<AgentState | null>(null)
+  const [version, setVersion] = useState<AgentVersion | null>(null)
+  const [pluginVersion, setPluginVersion] = useState<string | null>(null)
+  const [games, setGames] = useState<TrackedGame[]>([])
+  const [syncing, setSyncing] = useState(false)
+  const conflicts = useOpenConflicts()
+
+  const refresh = async () => {
+    const [s, v, g] = await Promise.all([fetchState(), fetchVersion(), fetchGames()])
+    if (s.ok) setState(s.data)
+    else setState(null)
+    if (v.ok) setVersion(v.data)
+    if (g.ok) setGames(g.data)
+  }
+
+  useEffect(() => {
+    void refresh()
+    // The plugin's own version never changes at runtime, unlike everything else here — fetched
+    // once rather than on every poll tick.
+    void fetchPluginVersion().then(setPluginVersion)
+    const t = setInterval(() => void refresh(), 5 * 1000)
+    return () => clearInterval(t)
+  }, [])
+
+  const nameFor = (gameId: string) => games.find((g) => g.gameId === gameId)?.name ?? 'A tracked game'
+  const warnings = state?.leaseWarnings ?? []
+  const nothingToDo = conflicts.length === 0 && warnings.length === 0
+
+  const dismiss = async (gameName: string) => {
+    await dismissWarning(gameName)
+    await refresh()
+  }
+
+  const syncAll = async () => {
+    setSyncing(true)
+    try {
+      await runSync('pull', null, false)
+      await runSync('push', null, false)
+      await refresh()
+      saveLockerToast('success', 'sync all games finished')
+    } finally {
+      setSyncing(false)
+    }
+  }
+
+  // Staged and available are not the same thing and must not read the same. "ready" is only true
+  // of a payload that is already here and verified — the one the Update section can install on the
+  // spot. This is the same line the QAM's Status section draws, with the same wording.
+  const agentValue = version?.stagedVersion
+    ? `${version.currentVersion} → ${version.stagedVersion} ready`
+    : version?.updateAvailable
+      ? `${version.currentVersion} → ${version.latestVersion} available`
+      : state?.currentVersion ?? '—'
+
+  return (
+    <>
+      <Section title="This deck">
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '10px' }}>
+          <Tile label="Server" value={state ? (state.connected ? state.machineName : 'not connected') : '—'} />
+          <Tile label="Games" value={state ? String(state.gamesTracked) : '—'} />
+          <Tile label="Last sync" value={state?.lastSyncAgo ?? '—'} />
+          <Tile label="Agent" value={agentValue} />
+          <Tile label="Plugin" value={pluginVersion ?? '—'} />
+        </div>
+      </Section>
+
+      {version?.stagedVersion && (
+        <Section title="Update">
+          <StagedUpdateRow version={version} onSettled={() => void refresh()} />
+        </Section>
+      )}
+
+      <Section title="Needs attention">
+        {nothingToDo && <div style={DIM}>All clear.</div>}
+        {conflicts.map((c) => (
+          <Field
+            key={c.id}
+            focusable
+            bottomSeparator="standard"
+            label={`Save conflict — ${nameFor(c.gameId)}`}
+            description={`This Deck and the cloud both changed since the last sync${c.escalated ? ' — unresolved for a while' : ''}.`}
+            onActivate={() => openConflictResolveModal(c.id)}
+            onClick={() => openConflictResolveModal(c.id)}
+          />
+        ))}
+        {warnings.map((w) => (
+          <Field
+            key={`lease-${w.gameName}`}
+            bottomSeparator="standard"
+            label={`Checked out elsewhere — ${w.gameName}`}
+            description={`Open on ${w.holderMachine}. Playing here may cause a conflict.`}
+            childrenLayout="inline"
+            childrenContainerWidth="min"
+          >
+            {/* Dismiss clears the notice, not the condition — if the lease is still held the agent
+                records it again. That is right: the warning exists to be seen before launching. */}
+            <DialogButton style={SMALL_BUTTON} onClick={() => void dismiss(w.gameName)}>Dismiss</DialogButton>
+          </Field>
+        ))}
+      </Section>
+
+      {/* DLC holds keep their own QAM-era component: one game, two honest actions, and the logic to
+          offer exactly those two lives there; re-rendering the same data as bespoke rows here would
+          be a copy that can drift. It renders nothing when there are no holds. */}
+      <DlcHolds />
+
+      <Section title="Quick actions">
+        <DialogButton
+          disabled={syncing}
+          onClick={() => void syncAll()}
+          style={{ width: '100%', padding: '16px', fontSize: '16px' }}
+        >
+          {syncing ? 'Syncing…' : 'Sync all games'}
+        </DialogButton>
+      </Section>
+    </>
+  )
+}
+
+/**
+ * Games — search plus the tracked-games list; a game's row opens its settings dialog.
+ *
+ * The list carries only what identifies a game and its open conflict (a chip). It deliberately
+ * does NOT claim "in sync": that answer costs a save-folder hash and is only fetched on demand
+ * inside the dialog (the plan's Phase 12 rule — never poll it, the same disk cost a push pays).
+ * A green "in sync" beside every row here would be an invention, and one the user would discover
+ * was invented the first time a conflict appeared under it.
+ */
+function GamesPage() {
+  const [games, setGames] = useState<TrackedGame[]>([])
+  const [machineId, setMachineId] = useState<string | null>(null)
+  const [syncOnOpenOverrides, setSyncOnOpenOverrides] = useState<Record<string, boolean>>({})
+  const [search, setSearch] = useState('')
+  const conflicts = useOpenConflicts()
+
+  const refresh = async () => {
+    const [g, s, o] = await Promise.all([fetchGames(), fetchState(), fetchSyncOnOpenOverrides()])
+    if (g.ok) setGames(g.data)
+    if (s.ok) setMachineId(s.data.machineId)
+    setSyncOnOpenOverrides(o)
+  }
+
+  useEffect(() => {
+    void refresh()
+    // Games change rarely (enrolment, alias edits elsewhere); this page only needs to notice a
+    // game appearing while it is open, not to chase the QAM's status cadence.
+    const t = setInterval(() => void refresh(), 30 * 1000)
+    return () => clearInterval(t)
+  }, [])
+
+  const query = search.trim().toLowerCase()
+  const filtered = query === '' ? games : games.filter((g) => {
+    const effective = (g.alias ?? g.name).toLowerCase()
+    return g.name.toLowerCase().includes(query) || effective.includes(query)
+  })
+
+  const openGame = (game: TrackedGame) => {
+    showModal(
+      <GameSettingsModal
+        game={game}
+        machineId={machineId}
+        syncOnOpenEnabled={syncOnOpenOverrides[game.gameId] ?? true}
+        onSyncOnOpenChanged={(gameId, value) => setSyncOnOpenOverrides((prev) => ({ ...prev, [gameId]: value }))}
+        onChanged={() => void refresh()}
+      />,
+    )
+  }
+
+  return (
+    <Section title="Games">
+      <TextField label="Search games" value={search} onChange={(e: any) => setSearch(e?.target?.value ?? '')} />
+      <div style={{ ...DIM, fontSize: '12px', padding: '6px 0 10px' }}>
+        {query === '' ? `${games.length} tracked` : `${filtered.length} of ${games.length}`}
+      </div>
+      {/* flow-children="down": the gamepad must step row-to-row; without a forced vertical flow
+          Steam's default navigation considers a row's children (the chip) before moving past the
+          row, which turns "down" into an extra stop per game. */}
+      <Focusable flow-children="down">
+        {filtered.length === 0 && (
+          <div style={{ ...DIM, padding: '8px 0' }}>
+            {games.length === 0 ? 'No tracked games yet.' : `No games match "${search.trim()}".`}
+          </div>
+        )}
+        {filtered.map((g) => {
+          const conflict = conflicts.find((c) => c.gameId === g.gameId)
+          return (
+            <Field
+              key={g.gameId}
+              focusable
+              bottomSeparator="standard"
+              label={g.name}
+              description={`alias: ${g.alias ?? g.name} · ${g.hasSteamCloud ? 'Steam Cloud' : 'no Steam Cloud'}`}
+              onActivate={() => openGame(g)}
+              onClick={() => openGame(g)}
+            >
+              {conflict && <Chip kind="conflict">Save conflict</Chip>}
+            </Field>
+          )
+        })}
+      </Focusable>
+    </Section>
+  )
+}
+
+/**
+ * One game's settings — the dialog the Games list opens.
+ *
+ * Everything the old list crammed into each row lives here at full width: the alias editor, both
+ * launch-behaviour toggles, the conflict policy, an on-demand sync check, the conflict resolver,
+ * and a one-game sync. The toggle rules below are carried over verbatim in behaviour from that
+ * list, including why "Sync on page open" disappears rather than greys out, and why a policy save
+ * that would record "prefer this device" without a registered machine is refused up front.
+ */
+function GameSettingsModal({ game, machineId, syncOnOpenEnabled, onSyncOnOpenChanged, onChanged, closeModal }: {
   game: TrackedGame
-  syncOnOpenEnabled: boolean
   /** This device's own machine id (from `/api/state`), or null before this device has registered. */
   machineId: string | null
-  onChanged: () => void
+  syncOnOpenEnabled: boolean
   onSyncOnOpenChanged: (gameId: string, value: boolean) => void
+  onChanged: () => void
+  closeModal?: () => void
 }) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState('')
@@ -60,14 +397,14 @@ function GameRow({ game, syncOnOpenEnabled, machineId, onChanged, onSyncOnOpenCh
   const [syncStatus, setSyncStatus] = useState<SyncStatus | null>(null)
   const [syncStatusBusy, setSyncStatusBusy] = useState(false)
   const [syncStatusError, setSyncStatusError] = useState<string | null>(null)
+  const [syncing, setSyncing] = useState(false)
 
   useEffect(() => {
     void fetchConflictPolicy(game.gameId).then((r) => { if (r.ok) setPolicy(r.data) })
   }, [game.gameId])
 
-  // On demand only — plan.md Phase 12 is explicit that this must never run on a timer or a passive
-  // list refresh: the route hashes the whole save folder to answer, the same disk cost a push's own
-  // hash pays, so it only runs when this row's own button is pressed.
+  // On demand only — the route hashes the whole save folder to answer, the same disk cost a push's
+  // own hash pays, so it only runs when this dialog's own button is pressed.
   const checkSyncStatus = async () => {
     setSyncStatusBusy(true)
     setSyncStatusError(null)
@@ -150,129 +487,133 @@ function GameRow({ game, syncOnOpenEnabled, machineId, onChanged, onSyncOnOpenCh
     }
   }
 
-  return (
-    <Focusable
-      style={{
-        background: 'rgba(255,255,255,0.04)', borderRadius: '8px', padding: '10px 14px',
-        marginBottom: '6px',
-      }}
-    >
-      <div style={{ display: 'flex', alignItems: 'center', gap: '12px', flexWrap: 'wrap' }}>
-        <div style={{ flex: '1 1 140px', minWidth: 0 }}>
-          <div style={{ fontSize: '15px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-            {game.name}
-          </div>
-          {!editing && (
-            <div style={{
-              fontSize: '12px', opacity: 0.65, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-            }}
-            >
-              alias: {effective} · {game.hasSteamCloud ? 'Steam Cloud' : 'no Steam Cloud'}
-            </div>
-          )}
-        </div>
-        {!editing && (
-          // flow-children="right": the pull toggle and the edit-alias button are two controls
-          // side by side in the same row — without this they inherit the list's vertical "down"
-          // flow, so left/right would fall through this row's boundary before ever switching
-          // between them, instead of picking one and reserving down for the next game.
-          //
-          // flexShrink: 0 + flexWrap: 'nowrap' here, and a fixed width on each ToggleField's own
-          // wrapper below: Steam's `ToggleField` (pulled from CommonUIModule, not this plugin's own
-          // component) lays itself out to fill 100% of whatever it's given rather than sizing to its
-          // label, so left unconstrained inside a flex row it claims far more width than the visible
-          // switch+label need — enough that adding the second toggle overflowed this row and pushed
-          // the OUTER row (the one with the game name) to wrap onto a new line entirely, rather than
-          // just this inner row reflowing on its own. Each toggle's fixed-width wrapper below caps
-          // that 100% against something narrow instead of the page.
-          <Focusable
-            flow-children="right"
-            style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'nowrap', flexShrink: 0 }}
-          >
-            <div style={{ width: '200px', flexShrink: 0 }}>
-              <ToggleField
-                label="Pull before launch"
-                checked={pullEnabled}
-                disabled={pullBusy}
-                onChange={(value: boolean) => void togglePull(value)}
-              />
-            </div>
-            {/* Only shown once "Pull before launch" is on — the setting is meaningless without it,
-                so it disappears rather than showing disabled (a disabled control with no visible
-                reason why invites poking at it to find out). On by default: see
-                `resolveSyncOnOpenEnabled` in gamingSync.tsx.
+  // Pull then push, one game — the panel's "sync everything" reduced to a target. Neither leg can
+  // lose data without `--force` (which stays a QAM action with its confirmation), so a refused or
+  // failed leg does not gate the other; they are classified from the agent's own words afterwards
+  // because both exit 0 for refusals too.
+  const syncThisGame = async () => {
+    setSyncing(true)
+    try {
+      const pull = await runSync('pull', game.name, false)
+      const push = await runSync('push', game.name, false)
+      if (!pull.ok && !push.ok) {
+        saveLockerToast('blocked', `Could not sync ${game.name}`, pull.reason)
+        return
+      }
+      const pullOutcome = pull.ok ? classifySyncOutput('pull', pull.data.output) : 'blocked'
+      const pushOutcome = push.ok ? classifySyncOutput('push', push.data.output) : 'blocked'
+      if (pullOutcome === 'blocked' || pushOutcome === 'blocked') {
+        saveLockerToast('blocked', `${game.name} finished with issues`, 'See the Quick Access panel for the agent\'s own output')
+      } else if (pullOutcome === 'up-to-date' && pushOutcome === 'up-to-date') {
+        saveLockerToast('info', `${game.name} is already up to date`)
+      } else {
+        saveLockerToast('success', `Synced ${game.name}`)
+      }
+      onChanged()
+    } finally {
+      setSyncing(false)
+    }
+  }
 
-                This MOVES the pull rather than adding a second one: with it on, opening the game's
-                library page pulls (and the page's status chip reports it), and pressing Play then
-                launches straight through instead of pulling again. `gamingSync.tsx` still falls back
-                to pulling at launch if no page-open pull actually happened — launching from a
-                collection or the Recents row never opens the page at all. */}
-            {pullEnabled && (
-              <div style={{ width: '180px', flexShrink: 0 }}>
-                <ToggleField
-                  label="Sync on page open"
-                  checked={syncOnOpenEnabled}
-                  disabled={syncOnOpenBusy}
-                  onChange={(value: boolean) => void toggleSyncOnOpen(value)}
-                />
-              </div>
-            )}
-            <DialogButton
-              onClick={startEdit}
-              style={{ width: 'auto', minWidth: 0, padding: '8px 14px', flexShrink: 0 }}
-            >
-              Edit alias
-            </DialogButton>
-          </Focusable>
+  // This can only ever set "prefer THIS device" — there is no fleet-wide machine picker here. If
+  // the dashboard or another device already set a DIFFERENT preferred machine, say so rather than
+  // silently implying this dropdown already reflects that.
+  const prefersOtherDevice = policy?.policy === 'PreferMachine' && policy.preferredMachineId
+    && machineId !== null && policy.preferredMachineId !== machineId
+
+  return (
+    <ModalRoot closeModal={closeModal} onCancel={closeModal}>
+      <div style={{ padding: '20px', maxWidth: '640px' }}>
+        <div style={{ fontSize: '16px', fontWeight: 700, marginBottom: '4px' }}>{game.name}</div>
+        <div style={{ fontSize: '13px', opacity: 0.75, marginBottom: '16px' }}>
+          {game.hasSteamCloud ? 'This title has Steam Cloud saves.' : 'No Steam Cloud saves.'}
+        </div>
+
+        <Field
+          label="Save folder"
+          description={<span style={{ wordBreak: 'break-all' }}>{game.saveDirectory}</span>}
+          bottomSeparator="standard"
+        />
+
+        <ToggleField
+          label="Pull before launch"
+          description={game.hasSteamCloud
+            ? 'Off by default: Steam Cloud already handles this title.'
+            : 'On: the save is current before the game starts.'}
+          checked={pullEnabled}
+          disabled={pullBusy}
+          onChange={(value: boolean) => void togglePull(value)}
+        />
+        {/* Only shown once "Pull before launch" is on — the setting is meaningless without it, so
+            it disappears rather than showing disabled (a disabled control with no visible reason
+            why invites poking at it to find out). On by default: see `resolveSyncOnOpenEnabled`. */}
+        {pullEnabled && (
+          <ToggleField
+            label="Sync on page open"
+            description="Moves the pull to the library page, so Play starts instantly."
+            checked={syncOnOpenEnabled}
+            disabled={syncOnOpenBusy}
+            onChange={(value: boolean) => void toggleSyncOnOpen(value)}
+          />
         )}
-      </div>
-      {editing && (
-        <Focusable style={{ display: 'flex', gap: '8px', marginTop: '8px', alignItems: 'center' }}>
-          <div style={{ flex: 1 }}>
-            <TextField value={draft} onChange={(e: any) => setDraft(e?.target?.value ?? '')} />
+
+        {!editing ? (
+          <Field
+            label="Alias"
+            description="Used when matching a launch to this game."
+            bottomSeparator="standard"
+            childrenLayout="inline"
+            childrenContainerWidth="min"
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <span style={{ opacity: 0.8, maxWidth: '220px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {effective}
+              </span>
+              <DialogButton style={SMALL_BUTTON} onClick={startEdit}>Edit alias</DialogButton>
+            </div>
+          </Field>
+        ) : (
+          <div style={{ margin: '10px 0' }}>
+            <TextField label="Alias" value={draft} onChange={(e: any) => setDraft(e?.target?.value ?? '')} />
+            <div style={{ display: 'flex', gap: '8px', marginTop: '10px' }}>
+              <DialogButton disabled={busy} style={SMALL_BUTTON} onClick={() => void save()}>
+                {busy ? 'Saving…' : 'Save'}
+              </DialogButton>
+              <DialogButton disabled={busy} style={SMALL_BUTTON} onClick={() => setEditing(false)}>Cancel</DialogButton>
+            </div>
           </div>
-          <DialogButton disabled={busy} onClick={() => void save()} style={{ width: 'auto', minWidth: 0 }}>
-            {busy ? 'Saving…' : 'Save'}
-          </DialogButton>
-          <DialogButton disabled={busy} onClick={() => setEditing(false)} style={{ width: 'auto', minWidth: 0 }}>
-            Cancel
-          </DialogButton>
-        </Focusable>
-      )}
-      {!editing && (
-        <Focusable style={{ marginTop: '6px', maxWidth: '280px' }}>
+        )}
+
+        <div style={{ maxWidth: '320px', marginTop: '12px' }}>
           <DropdownItem
             label="If a save conflict happens"
             rgOptions={CONFLICT_POLICY_OPTIONS}
             selectedOption={policy?.policy ?? 'Manual'}
             disabled={policyBusy}
             onChange={(o: any) => {
+              // Steam's own Dropdown, resolved out of CommonUIModule by shape — its callback
+              // contract is not ours to assume, so accept either the option object or a bare value.
               const picked = o && typeof o === 'object' && 'data' in o ? o.data : o
               void changePolicy(picked as ConflictPolicyKind)
             }}
           />
-          {/* This device can only ever set "prefer THIS device" (there is no fleet-wide machine
-              picker here) — if the dashboard or another device already set a DIFFERENT preferred
-              machine, say so rather than silently implying this dropdown already reflects that. */}
-          {policy?.policy === 'PreferMachine' && policy.preferredMachineId
-            && machineId !== null && policy.preferredMachineId !== machineId && (
+          {prefersOtherDevice && (
             <div style={{ fontSize: '10px', opacity: 0.6, marginTop: '2px' }}>
               Currently prefers a different device — set from the dashboard.
             </div>
           )}
-        </Focusable>
-      )}
-      {!editing && (
-        <Focusable style={{ display: 'flex', alignItems: 'center', gap: '10px', marginTop: '8px' }}>
+        </div>
+
+        <div style={{ display: 'flex', gap: '10px', marginTop: '14px', alignItems: 'center', flexWrap: 'wrap' }}>
           <DialogButton
             disabled={syncStatusBusy}
             onClick={() => void checkSyncStatus()}
-            style={{ width: 'auto', minWidth: 0, padding: '8px 14px', flexShrink: 0 }}
+            style={SMALL_BUTTON}
           >
             {syncStatusBusy ? 'Checking…' : 'Check sync status'}
           </DialogButton>
           {syncStatusError && (
-            <span style={{ fontSize: '12px', opacity: 0.7 }}>
+            <span style={DIM}>
               {syncStatusError === 'no-agent' ? 'SaveLocker is not installed on this device.'
                 : syncStatusError === 'unreachable' ? 'The SaveLocker agent is not running.'
                   : `Could not check (${syncStatusError}).`}
@@ -281,241 +622,48 @@ function GameRow({ game, syncOnOpenEnabled, machineId, onChanged, onSyncOnOpenCh
           {syncStatus && !syncStatusError && (
             syncStatus.hasOpenConflict && syncStatus.conflictId ? (
               <DialogButton
-                onClick={() => openConflictResolveModal(syncStatus.conflictId!)}
-                style={{ width: 'auto', minWidth: 0, padding: '8px 14px', flexShrink: 0 }}
+                onClick={() => {
+                  // Close this dialog first: the resolve popup is its own modal, and two stacked
+                  // modals leave the first one's focus handling and backdrop in the way.
+                  closeModal?.()
+                  openConflictResolveModal(syncStatus.conflictId!, { onClosed: () => onChanged() })
+                }}
+                style={SMALL_BUTTON}
               >
                 Open conflict — resolve
               </DialogButton>
             ) : (
-              <span style={{ fontSize: '12px', opacity: 0.8 }}>
-                {syncStatus.inSync ? 'In sync with the cloud.' : 'Out of sync with the cloud.'}
-              </span>
+              <Chip kind={syncStatus.inSync ? 'success' : 'blocked'}>
+                {syncStatus.inSync ? 'In sync with the cloud' : 'Out of sync with the cloud'}
+              </Chip>
             )
           )}
-        </Focusable>
-      )}
-    </Focusable>
-  )
-}
-
-function OverviewTab() {
-  const [state, setState] = useState<AgentState | null>(null)
-  const [version, setVersion] = useState<AgentVersion | null>(null)
-  const [pluginVersion, setPluginVersion] = useState<string | null>(null)
-  const [games, setGames] = useState<TrackedGame[]>([])
-  const [activity, setActivity] = useState<ActivityDto | null>(null)
-  const [search, setSearch] = useState('')
-  const [syncing, setSyncing] = useState(false)
-  const [syncOnOpenOverrides, setSyncOnOpenOverrides] = useState<Record<string, boolean>>({})
-
-  const refresh = async () => {
-    const [s, v, g, a, o] = await Promise.all([
-      fetchState(), fetchVersion(), fetchGames(), fetchActivity(), fetchSyncOnOpenOverrides(),
-    ])
-    if (s.ok) setState(s.data)
-    if (v.ok) setVersion(v.data)
-    if (g.ok) setGames(g.data)
-    if (a.ok) setActivity(a.data)
-    setSyncOnOpenOverrides(o)
-  }
-
-  useEffect(() => {
-    void refresh()
-    // The plugin's own version never changes at runtime, unlike everything else here — fetched once
-    // rather than on every poll tick.
-    void fetchPluginVersion().then(setPluginVersion)
-    // Same cadence as the QAM's own Status/Activity polling (index.tsx's Content()) — this page
-    // polls independently rather than sharing that timer, since it can be open at the same time as
-    // (or instead of) the QAM.
-    const t = setInterval(() => void refresh(), 5 * 1000)
-    return () => clearInterval(t)
-  }, [])
-
-  const query = search.trim().toLowerCase()
-  const filtered = query === '' ? games : games.filter((g) => {
-    const effective = (g.alias ?? g.name).toLowerCase()
-    return g.name.toLowerCase().includes(query) || effective.includes(query)
-  })
-
-  const syncAll = async () => {
-    setSyncing(true)
-    try {
-      await runSync('pull', null, false)
-      await runSync('push', null, false)
-      await refresh()
-    } finally {
-      setSyncing(false)
-    }
-  }
-
-  return (
-    <div>
-      <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '16px' }}>
-        <DialogButton disabled={syncing} onClick={() => void syncAll()} style={{ width: 'auto', minWidth: 0 }}>
-          {syncing ? 'Syncing…' : 'Sync all games'}
-        </DialogButton>
-      </div>
-
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '10px', marginBottom: '20px' }}>
-        {[
-          ['Server', state ? (state.connected ? state.machineName : 'not connected') : '—'],
-          ['Games', state ? String(state.gamesTracked) : '—'],
-          ['Last sync', state ? state.lastSyncAgo : '—'],
-          ['Agent', state ? state.currentVersion : '—'],
-          ['Plugin', pluginVersion ?? '—'],
-        ].map(([label, value]) => (
-          <div key={label} style={{ background: 'rgba(255,255,255,0.04)', borderRadius: '8px', padding: '10px' }}>
-            <div style={{ fontSize: '11px', opacity: 0.6 }}>{label}</div>
-            <div style={{ fontSize: '15px' }}>{value}</div>
-          </div>
-        ))}
-      </div>
-      {version?.stagedVersion && (
-        <div style={{ opacity: 0.75, fontSize: '13px', marginBottom: '16px' }}>
-          v{version.stagedVersion} is downloaded and verified — install it from the Quick Access panel.
         </div>
-      )}
 
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: '8px' }}>
-        <span style={{ fontSize: '13px', opacity: 0.6, letterSpacing: '0.04em' }}>GAMES</span>
-        <span style={{ fontSize: '12px', opacity: 0.6 }}>
-          {query === '' ? `${games.length} total` : `${filtered.length} of ${games.length}`}
-        </span>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '10px', marginTop: '20px' }}>
+          <DialogButton
+            disabled={syncing}
+            onClick={() => void syncThisGame()}
+            style={{ width: 'auto', minWidth: 0, padding: '8px 16px' }}
+          >
+            {syncing ? 'Syncing…' : 'Sync this game now'}
+          </DialogButton>
+          <DialogButton onClick={closeModal} style={{ width: 'auto', minWidth: 0, padding: '8px 16px' }}>
+            Close
+          </DialogButton>
+        </div>
       </div>
-      <div style={{ marginBottom: '10px' }}>
-        <TextField label="Search games" value={search} onChange={(e: any) => setSearch(e?.target?.value ?? '')} />
-      </div>
-      {/* flow-children="down": without it, D-pad down from a row's toggle can land on that same
-          row's "Edit alias" button instead of the next game — Panorama's default flow considers
-          both of a row's controls before moving past the row, since a plain wrapped flex layout
-          gives it no other ordering to go on. Forcing a vertical flow at the list level makes down
-          always step row-to-row regardless of which control inside a row currently has focus. */}
-      <Focusable flow-children="down" style={{ maxHeight: '320px', overflowY: 'auto', marginBottom: '24px' }}>
-        {filtered.length === 0 && (
-          <div style={{ opacity: 0.6, fontSize: '13px', padding: '8px 2px' }}>
-            {games.length === 0 ? 'No tracked games yet.' : `No games match "${search.trim()}".`}
-          </div>
-        )}
-        {filtered.map((g) => (
-          <GameRow
-            key={g.gameId}
-            game={g}
-            syncOnOpenEnabled={syncOnOpenOverrides[g.gameId] ?? true}
-            machineId={state?.machineId ?? null}
-            onChanged={() => void refresh()}
-            onSyncOnOpenChanged={(gameId, value) => {
-              // Optimistic, same reasoning as togglePull's onChanged(): don't wait out the next
-              // 5s poll to see the toggle you just flipped reflect back.
-              setSyncOnOpenOverrides((prev) => ({ ...prev, [gameId]: value }))
-            }}
-          />
-        ))}
-      </Focusable>
-
-      <div style={{ fontSize: '13px', opacity: 0.6, letterSpacing: '0.04em', marginBottom: '8px' }}>ACTIVITY</div>
-      <ActivityLog entries={activity?.recent ?? []} />
-    </div>
+    </ModalRoot>
   )
 }
 
 /**
- * The agent-wide history `SyncActivityTracker` keeps — every push, pull and refusal from every
- * source on this machine (the QAM's own buttons, Gaming Mode detection, the tray's "Sync All"), not
- * scoped to this plugin's own actions.
+ * The full check/apply UI, moved off the QAM entirely onto its own page — it was the single largest
+ * thing in the panel for the button pressed least often. index.tsx's Content() still runs the
+ * automatic dry-run pass every 5 minutes regardless of whether anyone ever opens this page (see its
+ * own effect there) — that safety net does not depend on this component existing.
  */
-function ActivityLog({ entries }: { entries: ActivityLogEntry[] }) {
-  return (
-    <PanelSection title="Activity">
-      {entries.length === 0 && (
-        <PanelSectionRow><ReadOnlyRow>Nothing yet.</ReadOnlyRow></PanelSectionRow>
-      )}
-      {entries.map((e, i) => (
-        <PanelSectionRow key={i}>
-          <ReadOnlyRow>
-            <div style={{ fontSize: '0.8em' }}>
-              <div style={{ opacity: 0.7 }}>{timeAgo(e.timestampUtc)}</div>
-              {/* The agent's own words, verbatim — same "don't paraphrase a refusal" principle the
-                  Sync panel's own output already follows. */}
-              <div style={{ wordBreak: 'break-word' }}>{e.message}</div>
-            </div>
-          </ReadOnlyRow>
-        </PanelSectionRow>
-      ))}
-    </PanelSection>
-  )
-}
-
-/**
- * `savelocker doctor`, on demand.
- *
- * Doctor is the only diagnostic a Deck has, and reaching it otherwise means Desktop Mode and a
- * terminal. On-demand only: it makes network calls and takes seconds, so it must never sit on a
- * timer behind a panel the user opened for something else.
- */
-function Diagnostics() {
-  const [busy, setBusy] = useState(false)
-  const [result, setResult] = useState<DoctorResult | null>(null)
-  const [problem, setProblem] = useState<string | null>(null)
-
-  const run = async () => {
-    setBusy(true)
-    setProblem(null)
-    try {
-      const r = await runDoctor()
-      if (r.ok) setResult(r.data)
-      else { setResult(null); setProblem(r.reason) }
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  return (
-    <div>
-      <div style={{ marginTop: '10px', marginBottom: '20px' }}>
-        <DialogButton
-          disabled={busy}
-          onClick={() => void run()}
-          style={{ width: '100%', padding: '16px', fontSize: '16px' }}
-        >
-          {busy ? 'Running doctor…' : 'Run doctor'}
-        </DialogButton>
-      </div>
-      {problem && (
-        <div style={{ opacity: 0.75, fontSize: '13px', marginBottom: '10px' }}>
-          {problem === 'no-agent' ? 'SaveLocker is not installed on this device.'
-            : problem === 'timeout' ? 'doctor did not finish within 60 seconds.'
-              : `Could not run doctor (${problem}).`}
-        </div>
-      )}
-      {result && (
-        <div>
-          <div style={{ opacity: 0.75, fontSize: '13px', marginBottom: '8px' }}>
-            {result.exitCode === 0 ? 'No problems found.' : `Exited ${result.exitCode} — see below.`}
-          </div>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', fontFamily: 'var(--font-mono, monospace)' }}>
-            {/* The agent's own words, verbatim — same principle as ActivityLog and Sync's output. */}
-            {result.output.split('\n').filter((l) => l.trim() !== '').map((l, i) => (
-              <div key={i} style={{
-                background: 'rgba(255,255,255,0.04)', borderRadius: '4px', padding: '5px 8px',
-                fontSize: '12px', whiteSpace: 'pre-wrap', wordBreak: 'break-all',
-              }}>
-                {l}
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-    </div>
-  )
-}
-
-/**
- * The full check/apply UI, moved off the QAM entirely onto its own tab here — it was the single
- * largest thing in the panel for the button pressed least often. index.tsx's Content() still runs
- * the automatic dry-run pass every 5 minutes regardless of whether anyone ever opens this tab (see
- * its own effect there) — that safety net does not depend on this component existing.
- */
-function LaunchOptions() {
+function LaunchOptionsPage() {
   const [outcomes, setOutcomes] = useState<Outcome[]>([])
   const [problem, setProblem] = useState<string | undefined>()
   const [busy, setBusy] = useState(false)
@@ -537,102 +685,181 @@ function LaunchOptions() {
 
   useEffect(() => { void run(false) }, [])
 
+  // One line the user can read at a glance, so the list below is detail rather than the answer —
+  // same mapping the old QAM tab used, chipped so the state reads before the text does.
+  const stateChip = (o: Outcome): ToastKind =>
+    o.state === 'written' ? 'success'
+      : o.state === 'already-correct' ? 'info'
+        : o.state === 'would-write' ? 'blocked'
+          : 'error'
+
   return (
-    <div>
+    <Section title="Steam launch options">
       <ToggleField
         label="Allow writing to Steam"
         description="Off: read and show what would change. On: actually set launch options."
         checked={write}
         onChange={setWrite}
       />
-      <div style={{ margin: '14px 0' }}>
-        <DialogButton disabled={busy} onClick={() => void run(write)} style={{ width: 'auto', minWidth: 0 }}>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', margin: '16px 0' }}>
+        <DialogButton
+          disabled={busy}
+          onClick={() => void run(write)}
+          style={{ width: 'auto', minWidth: '200px' }}
+        >
           {busy ? 'Checking…' : write ? 'Apply now' : 'Check (no changes)'}
         </DialogButton>
       </div>
 
-      {problem === 'no-agent' && (
-        <div style={{ opacity: 0.75, fontSize: '13px' }}>SaveLocker is not installed on this device.</div>
-      )}
-      {problem === 'unreachable' && (
-        <div style={{ opacity: 0.75, fontSize: '13px' }}>The SaveLocker agent is not running.</div>
-      )}
+      {problem === 'no-agent' && <div style={DIM}>SaveLocker is not installed on this device.</div>}
+      {problem === 'unreachable' && <div style={DIM}>The SaveLocker agent is not running.</div>}
       {problem && problem !== 'no-agent' && problem !== 'unreachable' && (
-        <div style={{ opacity: 0.75, fontSize: '13px' }}>Could not reach the SaveLocker agent ({problem}).</div>
+        <div style={DIM}>Could not reach the SaveLocker agent ({problem}).</div>
       )}
       {!problem && outcomes.length === 0 && (
-        <div style={{ opacity: 0.75, fontSize: '13px' }}>No tracked game launches through Steam.</div>
+        <div style={DIM}>No tracked game launches through Steam.</div>
       )}
       {outcomes.length > 0 && (
-        <div style={{ opacity: 0.8, fontSize: '13px', marginBottom: '10px' }}>{summarise(outcomes)}</div>
+        <div style={{ ...DIM, opacity: 0.8, marginBottom: '10px' }}>{summarise(outcomes)}</div>
       )}
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
-        {outcomes.map((o) => (
-          <div key={o.name} style={{ background: 'rgba(255,255,255,0.04)', borderRadius: '6px', padding: '8px 10px', fontSize: '13px' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', gap: '6px' }}>
-              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{o.name}</span>
-              <span style={{ flexShrink: 0, opacity: 0.75 }}>{shortState(o)}</span>
-            </div>
-            {/* The current value is the whole diagnostic on a first run: a game known to carry
-                mangohud that reads back "(empty)" proves the wrong field is being read, and that it
-                must not be allowed to write. */}
-            {o.state !== 'already-correct' && (
-              <div style={{ opacity: 0.7, wordBreak: 'break-all', marginTop: '2px', fontSize: '12px' }}>
-                <div>now: {o.current === '' ? '(empty)' : o.current}</div>
-                <div>target: {o.target}</div>
-                {o.detail && <div>error: {o.detail}</div>}
-              </div>
-            )}
-          </div>
-        ))}
-      </div>
-    </div>
+      {outcomes.map((o) => (
+        <Field
+          key={o.name}
+          bottomSeparator="standard"
+          label={
+            <span style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              {o.name}
+              <Chip kind={stateChip(o)}>{shortState(o)}</Chip>
+            </span>
+          }
+          // The current value is the whole diagnostic on a first run: a game known to carry
+          // mangohud that reads back "(empty)" proves the wrong field is being read, and that it
+          // must not be allowed to write. Kept verbatim from the old tab.
+          description={o.state !== 'already-correct' ? (
+            <span style={{ wordBreak: 'break-all' }}>
+              <div>now: {o.current === '' ? '(empty)' : o.current}</div>
+              <div>target: {o.target}</div>
+              {o.detail && <div>error: {o.detail}</div>}
+            </span>
+          ) : undefined}
+        />
+      ))}
+    </Section>
   )
 }
 
 /**
- * Steam's Tabs component (`TabRowTabs`) animates its header row's horizontal scroll position
- * whenever the active tab changes, so the row can bring an off-screen header into view — with the
- * default transition, switching to a tab whose header sits further right (the third one, here)
- * visibly glitches as the row animates under the newly-mounted content. Killing that transition/
- * animation (borrowed from a fix used by more than one other Decky plugin shipping a Tabs-based
- * full page — Freedeck and its forks) leaves the row jumping straight to position instead, and
- * forces its scroll panels to lay out immediately rather than mid-animation.
- *
- * The `[class*="…"]` selectors match on a substring of Steam's build-hashed CSS module class names
- * (e.g. `TabRowTabs_a1b2c3`), which is stable across Steam client updates in a way a full class name
- * isn't — the same technique `@decky/ui` itself uses internally to locate these components.
+ * The agent-wide history `SyncActivityTracker` keeps — every push, pull and refusal from every
+ * source on this machine (the QAM's own buttons, Gaming Mode detection, the tray's "Sync All"), not
+ * scoped to this plugin's own actions.
  */
-const tabStabilityCss = `
-  .savelocker-fullpage [class*="TabContentsScroll"],
-  .savelocker-fullpage [class*="TabContents"],
-  .savelocker-fullpage [class*="ScrollPanel"] {
-    overflow-y: auto !important;
-  }
-  .savelocker-fullpage [class*="TabHeaderRowWrapper"],
-  .savelocker-fullpage [class*="TabRowTabs"],
-  .savelocker-fullpage [class*="TabsRowScroll"],
-  .savelocker-fullpage [class*="TabRow"] {
-    transition: none !important;
-    animation: none !important;
-    scroll-behavior: auto !important;
-  }
-`
+function ActivityPage() {
+  const [activity, setActivity] = useState<ActivityDto | null>(null)
+
+  useEffect(() => {
+    const refresh = async () => {
+      const a = await fetchActivity()
+      if (a.ok) setActivity(a.data)
+    }
+    void refresh()
+    const t = setInterval(() => void refresh(), 15 * 1000)
+    return () => clearInterval(t)
+  }, [])
+
+  const entries: ActivityLogEntry[] = activity?.recent ?? []
+
+  return (
+    <Section title="Recent activity">
+      {entries.length === 0 && <div style={DIM}>Nothing yet.</div>}
+      {entries.map((e, i) => (
+        <Field
+          key={i}
+          bottomSeparator="standard"
+          label={<span style={{ fontSize: '15px' }}>{e.message}</span>}
+          description={timeAgo(e.timestampUtc)}
+        />
+      ))}
+    </Section>
+  )
+}
 
 /**
- * Bug 2: this route always opened scrolled partway down instead of at the top. `Tabs`'s own
- * `autoFocusContents` (above) focuses something inside the freshly-mounted tab so the gamepad has an
- * entry point, and Steam's gamepad navigation scrolls whatever holds focus into view — landing
- * wherever that element happens to sit rather than at the page's own top. Rather than guess which
- * Steam-owned ancestor is the actual scrolling element (its class names are build-hashed, and the
- * `[class*="…"]` substrings above already show they can't be hardcoded), this walks every ancestor of
- * the page root and zeroes `scrollTop` on whichever ones are actually scrollable.
+ * `savelocker doctor`, on demand.
+ *
+ * Doctor is the only diagnostic a Deck has, and reaching it otherwise means Desktop Mode and a
+ * terminal. On-demand only: it makes network calls and takes seconds, so it must never sit on a
+ * timer behind a page the user opened for something else.
+ */
+function DiagnosticsPage() {
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState<DoctorResult | null>(null)
+  const [problem, setProblem] = useState<string | null>(null)
+
+  const run = async () => {
+    setBusy(true)
+    setProblem(null)
+    try {
+      const r = await runDoctor()
+      if (r.ok) setResult(r.data)
+      else { setResult(null); setProblem(r.reason) }
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Section title="Doctor">
+      <DialogButton
+        disabled={busy}
+        onClick={() => void run()}
+        style={{ width: '100%', padding: '16px', fontSize: '16px', marginTop: '10px', marginBottom: '20px' }}
+      >
+        {busy ? 'Running doctor…' : 'Run doctor'}
+      </DialogButton>
+
+      {problem && (
+        <div style={{ ...DIM, marginBottom: '10px' }}>
+          {problem === 'no-agent' ? 'SaveLocker is not installed on this device.'
+            : problem === 'timeout' ? 'doctor did not finish within 60 seconds.'
+              : `Could not run doctor (${problem}).`}
+        </div>
+      )}
+
+      {result && (
+        <div>
+          <div style={{ ...DIM, marginBottom: '8px' }}>
+            {result.exitCode === 0 ? 'No problems found.' : `Exited ${result.exitCode} — see below.`}
+          </div>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', fontFamily: 'var(--font-mono, monospace)' }}>
+            {/* The agent's own words, verbatim — same principle as Activity and Sync's output. */}
+            {result.output.split('\n').filter((l) => l.trim() !== '').map((l, i) => (
+              <div key={i} style={{
+                background: 'rgba(255,255,255,0.04)', borderRadius: '4px', padding: '5px 8px',
+                fontSize: '12px', whiteSpace: 'pre-wrap', wordBreak: 'break-all',
+              }}
+              >
+                {l}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </Section>
+  )
+}
+
+/**
+ * Bug 2 (kept as a safety net): this route could open scrolled partway down instead of at the top,
+ * because Steam's gamepad navigation scrolls whatever holds focus into view on route entry. Rather
+ * than guess which Steam-owned ancestor is the actual scrolling element (its class names are
+ * build-hashed), this walks every ancestor of the page root and zeroes `scrollTop` on whichever
+ * ones are actually scrollable.
  *
  * Run more than once: the focus-driven scroll this is correcting for happens asynchronously (after
- * `autoFocusContents` settles, and again as each tab's own data fetch resolves and its content's
- * height changes), so a single reset immediately on mount can be undone a frame or two later by the
- * same thing this is working around.
+ * route entry settles, and again as each page's own data fetch resolves and its content's height
+ * changes), so a single reset immediately on mount can be undone a frame or two later by the same
+ * thing this is working around.
  */
 function resetFullPageScroll(): void {
   const root = document.querySelector('.savelocker-fullpage')
@@ -644,13 +871,7 @@ function resetFullPageScroll(): void {
 }
 
 export function FullPage() {
-  const [activeTab, setActiveTab] = useState('overview')
-
-  const tabs = [
-    { id: 'overview', title: 'Overview', content: <OverviewTab /> },
-    { id: 'diagnostics', title: 'Diagnostics', content: <Diagnostics /> },
-    { id: 'launch', title: 'Launch options', content: <LaunchOptions /> },
-  ]
+  const [activePage, setActivePage] = useState('status')
 
   useEffect(() => {
     resetFullPageScroll()
@@ -660,13 +881,26 @@ export function FullPage() {
   }, [])
 
   return (
-    <div className="savelocker-fullpage" style={{ paddingTop: '48px', minHeight: '100%', boxSizing: 'border-box' }}>
-      <style>{tabStabilityCss}</style>
-      {/* autoFocusContents: without it nothing on the page is focused on mount, so the gamepad has no
-          entry point into it at all and L1/R1 (which Steam routes to whatever holds focus) never
-          reaches the Tabs component — matches the same prop used by SteamGridDB's own Tabs-based
-          full page, one of the most-used Decky plugins, for the identical layout shape. */}
-      <Tabs autoFocusContents activeTab={activeTab} onShowTab={setActiveTab} tabs={tabs} />
+    <div className="savelocker-fullpage" style={{ height: '100%', minHeight: '100%' }}>
+      {/* SidebarNavigation is Steam's own PagedSettingsDialog (see @decky/ui's resolution in
+          SidebarNavigation.js): title and page list on the left, the active page's content on the
+          right, with Valve's focus/scroll handling. Only the active page's content mounts, so each
+          page's polling starts and stops with it. `page`/`onPageRequested` make it controlled —
+          the same usage Decky's documentation shows for plugin settings pages. */}
+      <SidebarNavigation
+        title="SaveLocker"
+        showTitle
+        page={activePage}
+        onPageRequested={setActivePage}
+        pages={[
+          { title: 'Status', content: <StatusPage />, icon: <FaShieldAlt />, identifier: 'status' },
+          { title: 'Games', content: <GamesPage />, icon: <FaGamepad />, identifier: 'games' },
+          { title: 'Launch options', content: <LaunchOptionsPage />, icon: <FaRocket />, identifier: 'launch' },
+          'separator',
+          { title: 'Activity', content: <ActivityPage />, icon: <FaHistory />, identifier: 'activity' },
+          { title: 'Diagnostics', content: <DiagnosticsPage />, icon: <FaStethoscope />, identifier: 'diagnostics' },
+        ]}
+      />
     </div>
   )
 }
