@@ -1,0 +1,1119 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SaveLocker QAM — redesign mockup (1280x800, Steam Gamepad UI)</title>
+<!--
+  SaveLocker QAM redesign — clickable mockup.
+
+  WHY THIS FILE EXISTS
+  --------------------
+  The shipped Quick Access panel stacks up to nine PanelSections (conflicts, leases, DLC holds,
+  status, progress, update, sync, gaming-mode toggle, more) — roughly twenty focus stops of D-pad
+  scrolling where the answer to "is everything okay, and what do I press?" is never on screen at
+  once. This mockup re-cuts that panel around three questions, in order: what is the state, does
+  anything need me, and how do I sync. Everything else (force actions, raw output, DLC handover,
+  update install) moves one level down into Steam-native modals, which is the pattern this codebase
+  already uses for conflict resolution and launch questions.
+
+  STYLING PROVENANCE (all values taken from Valve's own CSS, not eyeballed)
+  -------------------------------------------------------------------------
+  Extracted from the installed Steam client's gamepad UI stylesheet
+  (`steamui/css/chunk~2dcc5aaf7.css`) by locating the semantic class hashes in
+  `steamui/chunk~2dcc5aaf7.js` (the source of Decky's runtime `staticClasses`), then reading the
+  matched rules:
+
+    - QAM panel:          348px visible (854px drawer translated 506px), full height, solid #0e141b
+    - QAM title bar:      22px/28 bold, uppercase, letter-spacing 1px, padding 6px 0 0 16px,
+                          background #0e141b, box-shadow 0 0 7px 12px #0e141b (masks scrolled rows)
+    - Tab rail:           48px wide, vertical; tab 48x64, icon 24px, color #8b929a;
+                          hover rgba(255,255,255,.05), selected rgba(255,255,255,.2),
+                          focus/active #fff background with #0e141b icon; 1px divider right edge
+    - Panel section:      padding 0 16px, margin-bottom 24px; title uppercase 16px/600,
+                          letter-spacing .5px, color rgba(255,255,255,.7), padding-bottom 8px
+    - Field row:          flex row, column-gap 12px, radius 2px, 10-12px vertical padding;
+                          row separator 1px rgba(255,255,255,.1) inset 16px from panel edge;
+                          focus = background #3d4450, text #fff, no outline
+    - Field label:        16px/20, color #dcdedf (focus: #fff)
+    - Dialog button:      color #dcdedf, 16px/20, background rgba(255,255,255,.15), radius 2px,
+                          padding 10px 24px, hover rgba(255,255,255,.2);
+                          focus/active = #fff background + #23262e text;
+                          primary focus = #1a9fff; destructive focus = #de3618;
+                          disabled = opacity .4 on #131418
+    - Toggle:             38x22 radius 16; off track rgba(255,255,255,.15) with white 22px knob;
+                          on = #1a9fff fill, knob translateX(16px); hover halo 0 0 0 4px
+                          rgba(255,255,255,.3); focus halo + 2px #67707b knob border when off
+    - Gamepad focus ring: outline 2px hsla(0,0%,100%,.6), outline-offset 2px, grow/fade/blink
+    - Modal:              scrim rgba(0,0,0,.85) + backdrop blur 3px; dialog #0e141b,
+                          border 2px #23262e, width 660px, slide-in .5s cubic-bezier(.16,.86,.43,.99)
+    - Footer:             40px, black scrim, right-aligned glyph hints (Steam/QAM/B/... style)
+    - Font:               "Motiva Sans", Helvetica, sans-serif (served from Steam's public CDN)
+
+  Status colours (chip dots, toast circles) reuse the plugin's existing `toast.tsx` KIND_STYLE
+  palette verbatim, so the redesign keeps the status language the plugin already established.
+
+  WHAT IS CLICKABLE
+  -----------------
+  - State switcher (top-left, marked as mockup chrome): 6 scenarios, keys 1-6
+  - Rail tabs highlight on click (only SaveLocker has content in this mockup)
+  - Game dropdown opens a Steam-style context menu; picking a game updates the row
+  - "Sync now" runs a simulated sync: hero becomes the progress card, then a result row + toast
+  - Needs-attention rows open their native flows (conflict resolve, DLC handover, lease dismiss,
+    staged update install incl. the blocked-while-playing variant, doctor for the offline state)
+  - "Advanced" opens the sync sheet with Push/Pull + Force actions (Force goes through a
+    destructive ConfirmModal-styled dialog, per the codebase's existing force-confirm rule)
+  - Toggle animates; "Settings and diagnostics" explains it would open the /savelocker page
+  - Keyboard: arrows + Enter navigate/activate (gamepad-style), B/Escape backs out, mouse works
+-->
+<style>
+/* --------------------------------------------------------------------------------------------- */
+/* Fonts — Steam's own public CDN, the same files Steam web / the client use. If offline, the     */
+/* declared fallback stack is identical to what Valve's CSS falls back to.                        */
+/* --------------------------------------------------------------------------------------------- */
+@font-face { font-family: "Motiva Sans"; font-weight: 400; font-style: normal;
+  src: url("https://community.cloudflare.steamstatic.com/public/shared/fonts/MotivaSans-Regular.ttf") format("truetype"); }
+@font-face { font-family: "Motiva Sans"; font-weight: 500; font-style: normal;
+  src: url("https://community.cloudflare.steamstatic.com/public/shared/fonts/MotivaSans-Medium.ttf") format("truetype"); }
+@font-face { font-family: "Motiva Sans"; font-weight: 700; font-style: normal;
+  src: url("https://community.cloudflare.steamstatic.com/public/shared/fonts/MotivaSans-Bold.ttf") format("truetype"); }
+
+:root {
+  /* Valve gamepad-UI tokens, values verbatim from the extracted rules (see file header). */
+  --qam-bg: #0e141b;
+  --qam-border: #23262e;
+  --field-focus-bg: #3d4450;
+  --fg: #dcdedf;
+  --fg-bright: #fff;
+  --fg-dim: rgba(255, 255, 255, .6);
+  --fg-faint: rgba(255, 255, 255, .4);
+  --icon: #8b929a;
+  --icon-disabled: #67707b;
+  --sep: rgba(255, 255, 255, .1);
+  --btn: rgba(255, 255, 255, .15);
+  --btn-hover: rgba(255, 255, 255, .2);
+  --btn-focus-fg: #23262e;
+  --accent: #1a9fff;
+  --danger: #de3618;
+  --green: #59bf40;
+
+  /* toast.tsx KIND_STYLE, verbatim — the plugin's own status language. */
+  --k-syncing-bg: #2a3a45;  --k-syncing-fg: #7fb8e0;
+  --k-success-bg: #1e3a2a;  --k-success-fg: #6fce9a;
+  --k-blocked-bg: #3a2f16;  --k-blocked-fg: #e0b355;
+  --k-error-bg:   #3a1e1e;  --k-error-fg:   #e07272;
+  --k-warning-bg: #2f2440;  --k-warning-fg: #b596e6;
+  --k-info-bg:    #26292c;  --k-info-fg:    #9a9a96;
+  --k-conflict-bg:#3a1a2e;  --k-conflict-fg:#e0578f;
+}
+
+* { box-sizing: border-box; }
+.hidden { display: none !important; }
+html, body {
+  margin: 0; padding: 0; height: 100%;
+  background: #05070a;
+  font-family: "Motiva Sans", Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+body { display: flex; align-items: center; justify-content: center; overflow: hidden; }
+
+/* The Deck screen is 1280x800; the stage is authored at that size and scaled to the window. */
+#stage {
+  position: relative; width: 1280px; height: 800px; flex: none;
+  background: #000; overflow: hidden; transform-origin: center center;
+  box-shadow: 0 30px 120px rgba(0, 0, 0, .8), 0 0 0 1px rgba(255, 255, 255, .06);
+}
+
+/* --------------------------------------------------------------------------------------------- */
+/* Backdrop — a neutral stand-in for "a game is running". No artwork is shipped; layered          */
+/* gradients only, so the QAM is read against the same mid-dark values it lives on on-device.     */
+/* --------------------------------------------------------------------------------------------- */
+#game { position: absolute; inset: 0; }
+#game .art {
+  position: absolute; inset: 0;
+  background:
+    radial-gradient(120% 90% at 72% 18%, rgba(84, 148, 190, .35) 0%, rgba(20, 40, 60, 0) 55%),
+    radial-gradient(90% 80% at 18% 82%, rgba(140, 80, 160, .22) 0%, rgba(30, 16, 40, 0) 60%),
+    radial-gradient(60% 50% at 50% 110%, rgba(30, 90, 80, .25) 0%, rgba(10, 20, 20, 0) 70%),
+    linear-gradient(160deg, #17222e 0%, #0c1218 55%, #090d12 100%);
+  filter: saturate(1.05);
+}
+#game .vignette { position: absolute; inset: 0; background: radial-gradient(120% 120% at 50% 50%, rgba(0,0,0,0) 45%, rgba(0,0,0,.55) 100%); }
+#game .scrim { position: absolute; inset: 0; background: rgba(0, 0, 0, .25); opacity: 0; transition: opacity .5s cubic-bezier(.16,.86,.43,.99); }
+body.qam-open #game .scrim { opacity: 1; }
+
+/* --------------------------------------------------------------------------------------------- */
+/* Global status bar (clock/battery/wifi) — stays visible above the QAM on-device; the QAM        */
+/* container itself is inset below --basicui-header-height.                                       */
+/* --------------------------------------------------------------------------------------------- */
+#statusbar {
+  position: absolute; top: 0; left: 0; right: 0; height: 48px; z-index: 60;
+  display: flex; align-items: center; justify-content: flex-end; gap: 18px;
+  padding-right: 24px; color: #fff; font-size: 16px; pointer-events: none;
+}
+#statusbar svg { display: block; }
+#statusbar .battery { display: flex; align-items: center; gap: 6px; font-weight: 500; }
+#statusbar .clock { font-weight: 500; letter-spacing: .3px; min-width: 74px; text-align: right; }
+
+/* --------------------------------------------------------------------------------------------- */
+/* The QAM panel itself.                                                                          */
+/* --------------------------------------------------------------------------------------------- */
+#qam {
+  position: absolute; top: 48px; right: 0; bottom: 0; width: 348px;
+  background: var(--qam-bg); display: flex; flex-direction: column;
+  transform: translateX(348px); transition: transform .32s cubic-bezier(.16,.86,.43,.99), opacity .32s ease-out;
+  opacity: 0; z-index: 50;
+}
+body.qam-open #qam { transform: none; opacity: 1; }
+
+.qam-title {
+  flex: none; position: relative; z-index: 5;
+  padding: 6px 0 0 16px; height: 34px;
+  background: var(--qam-bg); box-shadow: 0 0 7px 12px var(--qam-bg);
+  font-size: 22px; line-height: 28px; font-weight: 700; letter-spacing: 1px;
+  text-transform: uppercase; color: #fff;
+}
+
+.qam-body { flex: 1; display: flex; flex-direction: row; min-height: 0; }
+
+/* Tab rail — 48px vertical strip, left of the content column (divider on its right edge). */
+.qam-rail {
+  flex: none; width: 48px; display: flex; flex-direction: column; align-items: center;
+  border-right: 1px solid var(--sep); background: var(--qam-bg); z-index: 10; padding-bottom: 40px;
+}
+.rail-tab {
+  flex: none; width: 48px; height: 64px; display: flex; align-items: center; justify-content: center;
+  color: var(--icon); cursor: pointer; outline: none; transition: background-color .15s ease-in, color .15s ease-in;
+}
+.rail-tab:hover { background: rgba(255, 255, 255, .05); }
+.rail-tab.selected { background: rgba(255, 255, 255, .2); color: #fff; }
+.rail-tab.gpfocus, .rail-tab:focus { background: #fff; color: var(--qam-bg); }
+.rail-tab.power { margin-top: auto; }
+
+/* Content column — the 300px scroll region. Scrollbars are hidden in the gamepad UI. */
+.qam-content {
+  flex: none; width: 300px; overflow-y: auto; padding-top: 16px; padding-bottom: 64px;
+  scrollbar-width: none; -ms-overflow-style: none;
+}
+.qam-content::-webkit-scrollbar { display: none; }
+
+/* --------------------------------------------------------------------------------------------- */
+/* Panel sections and Field rows.                                                                 */
+/* --------------------------------------------------------------------------------------------- */
+.sec { padding: 0 16px; margin: 0 0 24px; }
+.sec-title {
+  font-size: 16px; line-height: 20px; font-weight: 600; letter-spacing: .5px;
+  text-transform: uppercase; color: rgba(255, 255, 255, .7); padding: 0 0 8px;
+}
+
+.row {
+  position: relative; display: flex; align-items: center; gap: 12px;
+  padding: 12px 0; border-radius: 2px; color: var(--fg); outline: none;
+}
+.row + .row::before {
+  content: ""; position: absolute; top: 0; left: -16px; right: -16px; height: 1px;
+  background: var(--sep);
+}
+.row[data-focusable] { cursor: pointer; }
+.row[data-focusable]:hover { background: rgba(255, 255, 255, .04); }
+.row[data-focusable].gpfocus, .row[data-focusable]:focus { background: var(--field-focus-bg); }
+.row[data-focusable].gpfocus .row-label, .row[data-focusable]:focus .row-label { color: var(--fg-bright); }
+.row[data-focusable].gpfocus .chev, .row[data-focusable]:focus .chev { color: var(--fg-bright); }
+.row.disabled { opacity: .45; pointer-events: none; }
+.row.disabled.no-click { pointer-events: auto; cursor: default; }
+
+.row-main { flex: 1; min-width: 0; }
+.row-label { font-size: 16px; line-height: 20px; color: var(--fg); display: flex; align-items: center; gap: 8px; }
+.row-desc { font-size: 12px; line-height: 16px; color: var(--fg-dim); margin-top: 2px; }
+.row-value { font-size: 16px; color: var(--fg-dim); white-space: nowrap; max-width: 62%; overflow: hidden; text-overflow: ellipsis; }
+.chev { flex: none; width: 16px; height: 16px; color: var(--icon); }
+.chev.down { transform: rotate(90deg); }
+
+/* Status dot — the redesign's severity marker for attention rows. */
+.dot { flex: none; width: 9px; height: 9px; border-radius: 50%; }
+.dot.ok       { background: var(--k-success-fg); }
+.dot.syncing  { background: var(--k-syncing-fg); }
+.dot.conflict { background: var(--k-conflict-fg); }
+.dot.blocked  { background: var(--k-blocked-fg); }
+.dot.error    { background: var(--k-error-fg); }
+.dot.warning  { background: var(--k-warning-fg); }
+.dot.info     { background: var(--k-info-fg); }
+.dot.pulse { animation: dotpulse 1.2s ease-in-out infinite; }
+@keyframes dotpulse { 50% { opacity: .35; } }
+
+/* Hero status block — the one piece of always-on information, above everything else. */
+.hero-wrap { padding: 0 16px; margin: 0 0 24px; }
+.hero { background: var(--qam-border); border-radius: 2px; padding: 12px 14px; }
+.hero-top { display: flex; align-items: center; gap: 9px; }
+.hero-headline { flex: 1; font-size: 16px; line-height: 21px; font-weight: 700; color: var(--fg-bright); }
+.hero-sub { font-size: 12px; line-height: 16px; color: var(--fg-dim); margin-top: 3px; }
+.hero-bar { margin-top: 9px; height: 4px; border-radius: 2px; background: rgba(255, 255, 255, .15); overflow: hidden; }
+.hero-bar > i { display: block; height: 100%; background: var(--accent); border-radius: 2px; transition: width .25s linear; }
+.hero-bar.indeterminate > i { width: 34%; animation: slide 1.1s ease-in-out infinite; }
+@keyframes slide { 0% { margin-left: -34%; } 100% { margin-left: 100%; } }
+
+/* --------------------------------------------------------------------------------------------- */
+/* Buttons — DialogButton, full-width stacked layout (Decky `ButtonItem layout="below"`).         */
+/* --------------------------------------------------------------------------------------------- */
+.btn {
+  display: block; width: 100%; padding: 10px 24px; margin: 0;
+  font-family: inherit; font-size: 16px; line-height: 20px; color: var(--fg);
+  background: var(--btn); border: 0; border-radius: 2px; text-align: center;
+  cursor: pointer; outline: none; transition: background-color .15s ease-in, color .15s ease-in;
+}
+.btn:hover { background: var(--btn-hover); }
+.btn.gpfocus, .btn:focus { background: #fff; color: var(--btn-focus-fg); }
+.btn.primary.gpfocus, .btn.primary:focus { background: var(--accent); color: #fff; }
+.btn.danger.gpfocus, .btn.danger:focus { background: var(--danger); color: #fff; }
+.btn[disabled] { opacity: .4; background: #131418; color: #fff; pointer-events: none; }
+.btn-row { display: flex; gap: 10px; margin-top: 10px; }
+.btn-row .btn { flex: 1; }
+.sec .btn { margin-top: 10px; }
+.sec .btn:first-child { margin-top: 0; }
+
+/* Small in-row action button (secondary actions inside a row, e.g. update install). */
+.btn.compact { width: auto; padding: 6px 14px; margin: 0; font-size: 14px; line-height: 18px; flex: none; }
+
+/* --------------------------------------------------------------------------------------------- */
+/* Toggle.                                                                                        */
+/* --------------------------------------------------------------------------------------------- */
+.toggle { flex: none; width: 38px; height: 22px; border-radius: 16px; position: relative;
+  background: hsla(0, 0%, 100%, .15); transition: background-color .2s ease-out; }
+.toggle > i { position: absolute; left: 0; top: 0; bottom: 0; width: 22px; border-radius: 50%;
+  background: #fff; box-shadow: 0 0 5px rgba(0, 0, 0, .35);
+  transition: transform .2s cubic-bezier(.1, .12, .53, 1.72); }
+.toggle.on { background: var(--accent); }
+.toggle.on > i { transform: translateX(16px); }
+.row[data-focusable].gpfocus .toggle, .row[data-focusable]:focus .toggle { box-shadow: 0 0 0 4px rgba(255, 255, 255, .3); }
+.row[data-focusable].gpfocus .toggle:not(.on), .row[data-focusable]:focus .toggle:not(.on) { background: var(--qam-border); }
+.row[data-focusable].gpfocus .toggle:not(.on) > i, .row[data-focusable]:focus .toggle:not(.on) > i { border: 2px solid var(--icon-disabled); margin: -2px; }
+
+/* --------------------------------------------------------------------------------------------- */
+/* Context menu (Steam dropdown popup: dark panel, white focus bar).                              */
+/* --------------------------------------------------------------------------------------------- */
+#menu-root { position: absolute; inset: 0; z-index: 90; display: none; }
+#menu-root.open { display: block; }
+.menu-pop {
+  position: absolute; width: 292px; max-height: 420px; overflow-y: auto; scrollbar-width: none;
+  background: var(--qam-border); border-radius: 3px; padding: 4px 0;
+  box-shadow: 0 10px 34px rgba(0, 0, 0, .6), 0 0 0 1px rgba(0, 0, 0, .4);
+}
+.menu-pop::-webkit-scrollbar { display: none; }
+.menu-item { padding: 9px 16px; font-size: 16px; color: var(--fg); cursor: pointer; outline: none; white-space: nowrap; }
+.menu-item:hover { background: rgba(255, 255, 255, .1); }
+.menu-item.gpfocus, .menu-item:focus { background: #fff; color: var(--btn-focus-fg); }
+.menu-sep { height: 1px; margin: 4px 0; background: rgba(255, 255, 255, .1); }
+
+/* --------------------------------------------------------------------------------------------- */
+/* Modals — gamepad dialog: rgba(0,0,0,.85) + blur(3px) scrim, #0e141b panel, 2px #23262e border, */
+/* 660px wide, slide-in per Valve's keyframe.                                                     */
+/* --------------------------------------------------------------------------------------------- */
+#modal-root { position: absolute; inset: 0; z-index: 100; display: none; }
+#modal-root.open { display: block; }
+.modal-scrim {
+  position: absolute; inset: 0; background: rgba(0, 0, 0, .85); backdrop-filter: blur(3px);
+  display: flex; align-items: center; justify-content: center;
+}
+.modal {
+  width: 660px; max-height: 700px; overflow-y: auto; scrollbar-width: none;
+  background: var(--qam-bg); border: 2px solid var(--qam-border); padding: 30px 36px;
+  animation: modalin .5s cubic-bezier(.16, .86, .43, .99) both;
+}
+.modal::-webkit-scrollbar { display: none; }
+@keyframes modalin { from { transform: translateY(26px); opacity: 0; } to { transform: none; opacity: 1; } }
+.modal-title { font-size: 22px; line-height: 28px; font-weight: 700; color: #fff; margin-bottom: 10px; }
+.modal-sub { font-size: 14px; line-height: 20px; color: var(--fg-dim); margin-bottom: 18px; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 24px; }
+.modal-actions .btn { width: auto; min-width: 150px; flex: none; }
+.modal-actions.stack { flex-direction: column; }
+.modal-actions.stack .btn { width: 100%; min-width: 0; }
+.modal-actions.split { justify-content: stretch; }
+.modal-actions.split .btn { flex: 1; min-width: 0; }
+.mini-label { font-size: 12px; font-weight: 700; letter-spacing: .8px; text-transform: uppercase;
+  color: var(--fg-faint); margin: 20px 0 8px; }
+.pre {
+  font-size: 12px; line-height: 17px; color: var(--fg-dim); white-space: pre-wrap; word-break: break-word;
+  background: #0a0e13; border: 1px solid var(--qam-border); border-radius: 2px; padding: 10px 12px;
+  max-height: 150px; overflow-y: auto; scrollbar-width: none;
+}
+.pre::-webkit-scrollbar { display: none; }
+
+/* Conflict resolve cards (kept from the shipped modal, re-tokened). */
+.side-cards { display: flex; gap: 10px; }
+.side-card { flex: 1; background: rgba(255, 255, 255, .05); border: 1px solid rgba(255, 255, 255, .12);
+  border-radius: 8px; padding: 14px; cursor: pointer; outline: none; }
+.side-card.gpfocus, .side-card:focus { background: rgba(255, 255, 255, .1); border-color: rgba(255, 255, 255, .4); }
+.side-card .side-title { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 700; }
+.side-card .side-when { font-size: 15px; margin: 8px 0 3px; }
+.side-card .side-meta { font-size: 11px; color: var(--fg-dim); }
+.side-card .side-cta { margin-top: 12px; }
+.newer-chip { font-size: 9.5px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase;
+  color: #16b992; background: rgba(18, 146, 113, .15); border-radius: 10px; padding: 1px 6px; }
+
+/* --------------------------------------------------------------------------------------------- */
+/* Toasts — same shape and icon-circle language as the plugin's existing toast.tsx helper.        */
+/* --------------------------------------------------------------------------------------------- */
+#toast-root { position: absolute; right: 16px; bottom: 56px; z-index: 200;
+  display: flex; flex-direction: column; gap: 10px; pointer-events: none; }
+.toast { pointer-events: auto; width: 344px; display: flex; gap: 12px; align-items: flex-start;
+  background: rgba(26, 29, 33, .97); border-radius: 4px; padding: 12px 14px 12px 0;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, .55); cursor: pointer;
+  animation: toastin .28s cubic-bezier(.16, .86, .43, .99) both; }
+@keyframes toastin { from { transform: translateY(14px); opacity: 0; } to { transform: none; opacity: 1; } }
+.toast .t-icon { flex: none; width: 28px; height: 28px; margin: 0 12px 0 0; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center; }
+.toast .t-icon svg { width: 14px; height: 14px; }
+.toast .t-title { font-size: 12px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase; color: var(--fg-dim); }
+.toast .t-body { font-size: 14px; line-height: 19px; color: var(--fg-bright); margin-top: 2px; }
+.toast .t-sub { font-size: 12px; line-height: 16px; color: var(--fg-dim); margin-top: 2px; }
+
+/* --------------------------------------------------------------------------------------------- */
+/* Footer glyph hints.                                                                            */
+/* --------------------------------------------------------------------------------------------- */
+#hints {
+  position: absolute; left: 0; right: 0; bottom: 0; height: 40px; z-index: 120;
+  display: flex; align-items: center; justify-content: flex-end; gap: 20px; padding-right: 18px;
+  background: rgba(0, 0, 0, .5);
+}
+.hint { display: flex; align-items: center; gap: 8px; }
+.hint .glyph { width: 24px; height: 24px; border-radius: 50%; background: #fff; color: #000;
+  font-size: 13px; font-weight: 700; display: flex; align-items: center; justify-content: center; }
+.hint .glyph.guide { background: #fff; }
+.hint .label { font-size: 13px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase; color: #fff; }
+#hints.inert .hint.dynamic { display: none; }
+
+/* --------------------------------------------------------------------------------------------- */
+/* Mockup chrome (state switcher) — deliberately styled so it cannot be mistaken for the UI.      */
+/* --------------------------------------------------------------------------------------------- */
+#mock {
+  position: absolute; left: 16px; top: 62px; z-index: 300; width: 250px;
+  background: rgba(8, 10, 14, .82); border: 1px dashed rgba(255, 255, 255, .28);
+  border-radius: 6px; padding: 10px 12px; color: #cfd6dd; font-size: 12px; line-height: 17px;
+}
+#mock h1 { margin: 0 0 6px; font-size: 12px; letter-spacing: 1px; text-transform: uppercase; color: #fff; }
+#mock .note { opacity: .6; margin-bottom: 8px; }
+#mock .states { display: flex; flex-wrap: wrap; gap: 5px; }
+#mock button {
+  font-family: inherit; font-size: 11px; padding: 4px 8px; border-radius: 4px; cursor: pointer;
+  background: #1d2530; color: #d7dee6; border: 1px solid #35404d;
+}
+#mock button.active { background: #2f6fbf; border-color: #5c9fe0; color: #fff; }
+#mock .keys { margin-top: 8px; opacity: .6; }
+#mock .reopen { display: none; margin-top: 8px; }
+#mock .reopen.show { display: block; }
+</style>
+</head>
+<body class="qam-open">
+<div id="stage">
+  <div id="game">
+    <div class="art"></div>
+    <div class="vignette"></div>
+    <div class="scrim"></div>
+  </div>
+
+  <!-- Global status bar. Icons are stand-ins in Valve's geometry; the clock/battery values are
+       placeholders, not live. -->
+  <header id="statusbar">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg>
+    <svg width="22" height="18" viewBox="0 0 24 18" fill="#fff"><path d="M12 14.5a2 2 0 1 1 0 3.5 2 2 0 0 1 0-3.5zM4.9 7.6a10.6 10.6 0 0 1 14.2 0l-2 2.2a7.6 7.6 0 0 0-10.2 0zM0.6 2.9a16.8 16.8 0 0 1 22.8 0l-2 2.2a13.8 13.8 0 0 0-18.8 0z"/></svg>
+    <div class="battery"><span>66%</span>
+      <svg width="26" height="14" viewBox="0 0 26 14"><rect x="1" y="1" width="21" height="12" rx="2" fill="none" stroke="#fff" stroke-width="1.6"/><rect x="23.5" y="4" width="2.5" height="6" rx="1" fill="#fff"/><rect x="3" y="3" width="14" height="8" rx="1" fill="#fff"/></svg>
+    </div>
+    <div class="clock">9:41 PM</div>
+  </header>
+
+  <!-- The Quick Access panel. -->
+  <aside id="qam" aria-label="Quick access menu">
+    <div class="qam-title">SaveLocker</div>
+    <div class="qam-body">
+      <nav class="qam-rail" aria-label="Quick access tabs">
+        <div class="rail-tab" title="Notifications (not part of this mockup)">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-2.5 8-2.5 8h17S18 15 18 8"/><path d="M13.7 20a2 2 0 0 1-3.4 0"/></svg>
+        </div>
+        <div class="rail-tab" title="Friends (not part of this mockup)">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="9" cy="8" r="3.4"/><path d="M2.5 20c.6-3.6 3.3-5.6 6.5-5.6s5.9 2 6.5 5.6"/><path d="M16 8.6a3 3 0 1 0 2.6-5.4"/><path d="M15.7 14.6c2.8.3 4.9 2 5.6 5"/></svg>
+        </div>
+        <div class="rail-tab" title="Downloads (not part of this mockup)">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v11"/><path d="M7 10l5 5 5-5"/><path d="M4 19h16"/></svg>
+        </div>
+        <div class="rail-tab" title="Performance (not part of this mockup)">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20.5 14a9 9 0 1 0-17 0"/><path d="M12 13.5L16 9"/><circle cx="12" cy="14" r="1.6"/></svg>
+        </div>
+        <div class="rail-tab" title="Decky (not part of this mockup)">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 7V3.5M15 7V3.5"/><path d="M6 7h12v4a6 6 0 0 1-12 0z"/><path d="M12 17v3.5"/></svg>
+        </div>
+        <div class="rail-tab selected" data-tab="savelocker" title="SaveLocker">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9.5h12a4 4 0 0 1 4 4v.5a4 4 0 0 1-4 4H6a4 4 0 0 1-4-4v-.5a4 4 0 0 1 4-4z"/><path d="M8 9.5V8a3 3 0 0 1 3-3h1a3 3 0 0 1 3 3v1.5"/><path d="M8 14.5h.01M16 14.5h.01"/></svg>
+        </div>
+        <div class="rail-tab" title="Settings (not part of this mockup)">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.2a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.9.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.9 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.2a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.9l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.9.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.2a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.9-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.9V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.2a1.7 1.7 0 0 0-1.4 1z"/></svg>
+        </div>
+        <div class="rail-tab power" title="Power (not part of this mockup)">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v8"/><path d="M6.2 6.8a7.5 7.5 0 1 0 11.6 0"/></svg>
+        </div>
+      </nav>
+
+      <div class="qam-content" id="content">
+        <!-- Hero: rendered by JS per scenario. -->
+        <div class="hero-wrap" id="hero-wrap"></div>
+
+        <!-- Needs attention: only exists when something does. Each row is one D-pad stop whose press
+             opens the native flow; no per-row button pairs, no inline logs. -->
+        <section class="sec hidden" id="sec-attention">
+          <div class="sec-title">Needs attention</div>
+          <div id="attention-rows"></div>
+        </section>
+
+        <section class="sec">
+          <div class="sec-title">Sync</div>
+          <div class="row" id="row-target" data-focusable data-action="target">
+            <div class="row-main">
+              <div class="row-label">Games</div>
+            </div>
+            <div class="row-value" id="target-value">All games</div>
+            <svg class="chev down" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+          </div>
+          <button class="btn" id="btn-sync-now">Sync now</button>
+          <div class="row hidden" id="row-result" data-focusable data-action="result">
+            <div class="row-main">
+              <div class="row-label" id="result-label">Last sync</div>
+            </div>
+            <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+          </div>
+          <div class="row" id="row-advanced" data-focusable data-action="advanced">
+            <div class="row-main">
+              <div class="row-label">Advanced</div>
+              <div class="row-desc">Push or pull one direction, force actions, last result</div>
+            </div>
+            <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+          </div>
+        </section>
+
+        <section class="sec">
+          <div class="sec-title">More</div>
+          <div class="row" id="row-gaming" data-focusable data-action="gaming">
+            <div class="row-main">
+              <div class="row-label">Auto-sync in Gaming Mode</div>
+              <div class="row-desc">Pulls before a game starts and pushes after it closes, for games without a launch-option wrapper.</div>
+            </div>
+            <div class="toggle on" id="toggle-gaming"><i></i></div>
+          </div>
+          <div class="row" id="row-settings" data-focusable data-action="settings">
+            <div class="row-main">
+              <div class="row-label">Settings and diagnostics</div>
+              <div class="row-desc">Launch options, per-game overrides, doctor</div>
+            </div>
+            <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+          </div>
+        </section>
+      </div>
+    </div>
+  </aside>
+
+  <div id="menu-root"></div>
+  <div id="modal-root"></div>
+  <div id="toast-root"></div>
+
+  <footer id="hints">
+    <div class="hint dynamic"><div class="glyph">A</div><div class="label">Select</div></div>
+    <div class="hint"><div class="glyph">B</div><div class="label">Back</div></div>
+  </footer>
+
+  <!-- Mockup chrome: switches between the designed states. Not part of the UI. -->
+  <div id="mock">
+    <h1>Mockup state</h1>
+    <div class="note">Not part of the UI — switches the designed states. Keys 1-6.</div>
+    <div class="states">
+      <button data-state="healthy" class="active">1 Healthy</button>
+      <button data-state="syncing">2 Syncing</button>
+      <button data-state="attention">3 Attention</button>
+      <button data-state="blocked">4 Update blocked</button>
+      <button data-state="offline">5 Offline</button>
+      <button data-state="empty">6 Empty</button>
+    </div>
+    <div class="keys">Click to focus; arrows + Enter navigate; B / Esc backs out.</div>
+    <div class="reopen" id="reopen"><button id="btn-reopen">Open the Quick Access Menu</button></div>
+  </div>
+</div>
+
+<script>
+"use strict";
+/* -----------------------------------------------------------------------------------------------
+   Mockup wiring only. The layout/states above are the deliverable; this script makes the flows
+   clickable so each state can be reviewed the way it would be reached on a Deck:
+   hero -> attention flows -> sync sheet -> force confirm -> toasts, plus gamepad-style focus.
+------------------------------------------------------------------------------------------------ */
+
+const $ = (sel, root) => (root || document).querySelector(sel);
+const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
+
+/* ---------------------------------------------------------------------------------
+   Toast rendering — mirrors toast.tsx's kindLogo(): 28px circle, KIND_STYLE palette.
+---------------------------------------------------------------------------------- */
+const TOAST_ICONS = {
+  syncing: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/></svg>',
+  success: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8 12.5l3 3 5-6"/></svg>',
+  blocked: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="5" y="10.5" width="14" height="9" rx="2"/><path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5"/></svg>',
+  error:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M9 9l6 6M15 9l-6 6"/></svg>',
+  warning: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4l9 16H3z"/><path d="M12 10v4M12 17h.01"/></svg>',
+  info:    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>',
+  conflict:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4v7a4 4 0 0 0 4 4h8"/><path d="M14 12l4 3-4 3"/><path d="M18 4v4a4 4 0 0 1-4 4"/></svg>',
+};
+
+function toast(kind, body, sub) {
+  const root = $("#toast-root");
+  const el = document.createElement("div");
+  el.className = "toast";
+  el.innerHTML =
+    `<div class="t-icon" style="background: var(--k-${kind}-bg); color: var(--k-${kind}-fg);">${TOAST_ICONS[kind] || TOAST_ICONS.info}</div>` +
+    `<div style="flex:1; min-width:0;"><div class="t-title">SaveLocker</div>` +
+    `<div class="t-body">${body}</div>` + (sub ? `<div class="t-sub">${sub}</div>` : "") + `</div>`;
+  el.addEventListener("click", () => el.remove());
+  root.appendChild(el);
+  setTimeout(() => { el.style.transition = "opacity .3s"; el.style.opacity = "0"; setTimeout(() => el.remove(), 320); }, 4200);
+}
+
+/* ---------------------------------------------------------------------------------
+   Scenario model. Copy is taken from the shipped panel wherever the wording is
+   load-bearing (blocked reasons verbatim, lease framing, staged-vs-available distinction).
+---------------------------------------------------------------------------------- */
+const GAMES = ["All games", "Death Stranding (Director's Cut)", "Elden Ring", "Halo 3", "Balatro"];
+
+const SCENARIOS = {
+  healthy: {
+    hero: { kind: "ok", headline: "SaveLocker is running",
+            sub: "Deck-01 · 14 games · synced 2m ago" },
+    attention: [],
+    target: "All games",
+    result: { label: "Last sync · 2m ago", lines: [
+      "pull: exit 0", "target: null", "restored latest save for Death Stranding (Director's Cut)",
+      "push: exit 0", "pushed new version for Balatro",
+    ] },
+    syncEnabled: true,
+  },
+  syncing: {
+    hero: { kind: "syncing", headline: "Syncing Death Stranding (Director's Cut)", sub: "pushing · 42%", pct: 42 },
+    attention: [],
+    target: "Death Stranding (Director's Cut)",
+    result: null,
+    busy: "sync",
+  },
+  attention: {
+    hero: { kind: "ok", headline: "SaveLocker is running",
+            sub: "Deck-01 · 14 games · synced 2m ago" },
+    attention: [
+      { id: "conflict", kind: "conflict", label: "Save conflict — Death Stranding (Director's Cut)",
+        desc: "This Deck and the cloud both changed since the last sync. Pick which save to keep." },
+      { id: "lease", kind: "warning", label: "Checked out elsewhere — Elden Ring",
+        desc: "Open on Deck-B. Playing here may cause a conflict." },
+      { id: "dlc", kind: "warning", label: "Waiting for DLC — Halo 3",
+        desc: "The newer save needs 2 packs this Deck does not have. The pull is held." },
+      { id: "update", kind: "syncing", label: "Update v0.3.1 ready",
+        desc: "Installs in a few seconds and restarts the agent. No game is affected." },
+    ],
+    target: "All games",
+    result: { label: "Last sync · 12m ago", lines: ["push: exit 0", "pushed new version for Halo 3"] },
+    syncEnabled: true,
+  },
+  blocked: {
+    hero: { kind: "ok", headline: "SaveLocker is running",
+            sub: "Deck-01 · 14 games · synced 6m ago" },
+    attention: [
+      { id: "update", kind: "syncing", label: "Update v0.3.1 ready",
+        desc: "A game is running. The update installs when the game closes.",
+        disabled: true, note: "The agent defers the swap while a game is open; the row returns by itself when it closes." },
+    ],
+    target: "All games",
+    result: null,
+    syncEnabled: true,
+  },
+  offline: {
+    hero: { kind: "error", headline: "SaveLocker is not responding",
+            sub: "The agent on this device is not reachable on localhost:5178." },
+    attention: [
+      { id: "agent", kind: "error", label: "SaveLocker agent not reachable",
+        desc: "Run a check to see what is wrong, or reinstall it from Desktop mode." },
+    ],
+    target: "All games",
+    result: null,
+    syncEnabled: false,
+  },
+  empty: {
+    hero: { kind: "info", headline: "No games tracked yet",
+            sub: "Track games in the SaveLocker dashboard and they appear here." },
+    attention: [],
+    target: "All games",
+    result: null,
+    syncEnabled: false,
+  },
+};
+
+let state = "healthy";
+let target = "All games";
+let gamingOn = true;
+let busy = null;          // null | 'sync' | 'install'
+let dismissed = new Set();  // attention row ids dismissed/handled during this session
+
+/* ---------------------------------------------------------------------------------
+   Rendering.
+---------------------------------------------------------------------------------- */
+function heroHtml(hero) {
+  const dot = `<span class="dot ${hero.kind}${hero.kind === "syncing" ? " pulse" : ""}"></span>`;
+  const bar =
+    hero.kind === "syncing"
+      ? hero.pct == null
+        ? `<div class="hero-bar indeterminate"><i></i></div>`
+        : `<div class="hero-bar"><i style="width:${hero.pct}%"></i></div>`
+      : "";
+  return `<div class="hero"><div class="hero-top">${dot}<div class="hero-headline">${hero.headline}</div></div>
+          <div class="hero-sub">${hero.sub}</div>${bar}</div>`;
+}
+
+function attentionHtml() {
+  const rows = SCENARIOS[state].attention.filter((r) => !dismissed.has(r.id));
+  const visible = rows.length > 0;
+  $("#sec-attention").classList.toggle("hidden", !visible);
+  $("#attention-rows").innerHTML = rows.map((r) => `
+    <div class="row ${r.disabled ? "disabled no-click" : ""}" data-focusable data-action="attention" data-id="${r.id}">
+      <span class="dot ${r.kind}"></span>
+      <div class="row-main">
+        <div class="row-label">${r.label}</div>
+        <div class="row-desc">${r.desc}</div>
+      </div>
+      ${r.disabled ? "" : '<svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>'}
+    </div>`).join("");
+  // The disabled update row keeps a pointer handler for its explanatory toast.
+  const dis = $("#attention-rows .row.disabled");
+  if (dis) dis.addEventListener("click", () => {
+    const r = SCENARIOS[state].attention.find((x) => x.id === dis.dataset.id);
+    toast("blocked", `${r.label}`, r.note || "Deferred while a game is running.");
+  });
+}
+
+function render() {
+  const sc = SCENARIOS[state];
+  $("#hero-wrap").innerHTML = heroHtml(sc.hero);
+  attentionHtml();
+
+  $("#target-value").textContent = target;
+  const syncOff = !sc.syncEnabled && !busy;
+  $("#row-target").classList.toggle("disabled", syncOff || !!busy);
+  $("#btn-sync-now").disabled = syncOff || !!busy;
+  $("#btn-sync-now").textContent = busy === "sync" ? "Syncing…" : "Sync now";
+  $("#row-advanced").classList.toggle("disabled", !!busy || syncOff);
+  $("#row-gaming").classList.toggle("disabled", false);
+  $("#row-result").classList.toggle("hidden", !sc.result);
+  if (sc.result) $("#result-label").textContent = sc.result.label;
+
+  $("#toggle-gaming").classList.toggle("on", gamingOn);
+  document.body.classList.add("qam-open");
+  $("#reopen").classList.remove("show");
+}
+
+/* ---------------------------------------------------------------------------------
+   Focus. Gamepad semantics: every interactive surface is focusable, focus follows
+   clicks, arrows move, A/Enter activates, B/Escape backs out of the topmost layer.
+---------------------------------------------------------------------------------- */
+function focusables(scope) {
+  return $$("[data-focusable], button, .rail-tab.selected, .menu-item, .side-card", scope || document)
+    .filter((el) => el.offsetParent !== null && !el.classList.contains("disabled") && !el.hasAttribute("disabled"));
+}
+let qamFocus = null, modalFocus = null, menuFocus = null;
+
+function setFocus(el) {
+  if (!el) return;
+  // Rows, rail tabs and menu items are divs; without a tabindex they cannot take DOM focus, which
+  // would both break the :focus fallback and make arrow-key navigation lose its position.
+  if (!el.hasAttribute("tabindex") && el.tagName !== "BUTTON") el.setAttribute("tabindex", "-1");
+  $$(".gpfocus", document).forEach((n) => n.classList.remove("gpfocus"));
+  el.focus();
+  el.classList.add("gpfocus");
+  if (!el.closest("#modal-root") && !el.closest("#menu-root")) qamFocus = el;
+}
+
+function move(dir) {
+  const scope = $("#modal-root").classList.contains("open") ? $("#modal-root")
+    : $("#menu-root").classList.contains("open") ? $("#menu-root") : $("#content");
+  const list = focusables(scope);
+  if (list.length === 0) return;
+  const i = list.indexOf(document.activeElement);
+  const next = i < 0 ? 0 : (i + dir + list.length) % list.length;
+  setFocus(list[next]);
+}
+
+document.addEventListener("keydown", (e) => {
+  if (e.key === "ArrowDown" || e.key === "ArrowRight" || (e.key === "Tab" && !e.shiftKey)) { e.preventDefault(); move(1); return; }
+  if (e.key === "ArrowUp" || e.key === "ArrowLeft" || (e.key === "Tab" && e.shiftKey)) { e.preventDefault(); move(-1); return; }
+  if (e.key === "Enter" || e.key === " ") {
+    const a = document.activeElement;
+    if (a && (a.tagName === "BUTTON" || a.dataset.focusable !== undefined || a.classList.contains("side-card"))) { e.preventDefault(); a.click(); }
+    return;
+  }
+  if (e.key === "Escape" || e.key === "b" || e.key === "Backspace") { e.preventDefault(); back(); return; }
+  if (/^[1-6]$/.test(e.key)) setState(Object.keys(SCENARIOS)[Number(e.key) - 1]);
+});
+
+function back() {
+  if ($("#modal-root").classList.contains("open")) { closeModal(); return; }
+  if ($("#menu-root").classList.contains("open")) { closeMenu(); return; }
+  // B on the QAM itself closes it, exactly like on-device; reopen from the mockup chrome.
+  document.body.classList.remove("qam-open");
+  $("#reopen").classList.add("show");
+  setTimeout(() => { if (!document.body.classList.contains("qam-open")) return; }, 400);
+}
+
+/* ---------------------------------------------------------------------------------
+   Context menu (dropdown).
+---------------------------------------------------------------------------------- */
+function openMenu(anchorEl, items, current, onPick) {
+  const root = $("#menu-root");
+  root.classList.add("open");
+  // #stage is scaled to fit the window, so viewport coords must be mapped back into stage space.
+  const rect = anchorEl.getBoundingClientRect();
+  const stageRect = $("#stage").getBoundingClientRect();
+  const scale = stageRect.width / 1280;
+  const pop = document.createElement("div");
+  pop.className = "menu-pop";
+  pop.style.left = `${(rect.left - stageRect.left) / scale}px`;
+  pop.style.top = `${(rect.bottom - stageRect.top) / scale + 4}px`;
+  pop.innerHTML = items.map((g, i) =>
+    `${g === null ? '<div class="menu-sep"></div>' : ""}
+     <div class="menu-item" data-i="${i}">${g === null ? "" : g}</div>`).join("");
+  root.innerHTML = "";
+  root.appendChild(pop);
+  const focusablesInMenu = Array.from(pop.querySelectorAll(".menu-item"));
+  const cur = focusablesInMenu.find((n) => n.textContent === current) || focusablesInMenu[0];
+  setFocus(cur);
+  // Assignments, not addEventListener: openMenu runs on every dropdown open and #menu-root
+  // persists, so listeners would accumulate and stale pick callbacks would refire.
+  root.onclick = (e) => {
+    const item = e.target.closest(".menu-item");
+    if (item) { onPick(item.textContent); closeMenu(); }
+  };
+  root.onmousedown = (e) => { if (e.target === root) closeMenu(); };
+  return menuFocus = cur;
+}
+function closeMenu() {
+  $("#menu-root").classList.remove("open");
+  $("#menu-root").innerHTML = "";
+  if (qamFocus && document.contains(qamFocus)) setFocus(qamFocus);
+}
+
+/* ---------------------------------------------------------------------------------
+   Modals — small declarative helper. `body` may contain [data-focusable] surfaces and
+   buttons; buttons without data-focusable are auto-collected for navigation.
+---------------------------------------------------------------------------------- */
+function openModal(html, opts) {
+  const root = $("#modal-root");
+  root.classList.add("open");
+  root.innerHTML = `<div class="modal-scrim"><div class="modal">${html}</div></div>`;
+  const closeOnScrim = !opts || opts.scrimClose !== false;
+  // Assignment, not addEventListener: openModal runs per dialog and the root element persists,
+  // so listeners would accumulate across every modal ever opened.
+  root.onmousedown = (e) => { if (closeOnScrim && e.target.classList.contains("modal-scrim")) closeModal(); };
+  if (opts && opts.onClose) root._onClose = opts.onClose;
+  const first = focusables(root)[0];
+  setFocus(first);
+  return root;
+}
+function closeModal() {
+  const root = $("#modal-root");
+  const cb = root._onClose;
+  root.classList.remove("open");
+  root.innerHTML = "";
+  root._onClose = null;
+  if (cb) cb();
+  if (qamFocus && document.contains(qamFocus)) setFocus(qamFocus);
+}
+
+/* ---------------------------------------------------------------------------------
+   Flows.
+---------------------------------------------------------------------------------- */
+function startSync(label) {
+  busy = "sync";
+  dismissed.delete("ok");
+  render();
+  SCENARIOS[state].hero = { kind: "syncing", headline: `Syncing ${target === "All games" ? "all games" : target}`, sub: "push", pct: 0 };
+  render();
+  let pct = 0;
+  const timer = setInterval(() => {
+    pct += 6 + Math.floor(Math.random() * 10);
+    if (pct >= 100) {
+      pct = 100;
+      clearInterval(timer);
+      setTimeout(() => {
+        busy = null;
+        SCENARIOS[state].hero = { kind: "ok", headline: "SaveLocker is running",
+          sub: "Deck-01 · 14 games · synced just now" };
+        SCENARIOS[state].result = { label: "Last sync · just now", lines: [
+          "pull: exit 0", "already up to date",
+          "push: exit 0", "pushed new version for Death Stranding (Director's Cut)",
+        ] };
+        render();
+        toast("success", `${label} finished`, target === "All games" ? "Saves are up to date everywhere" : undefined);
+      }, 350);
+    } else {
+      SCENARIOS[state].hero.pct = pct;
+      SCENARIOS[state].hero.sub = `${label.toLowerCase()} · ${pct}%`;
+      render();
+    }
+  }, 130);
+}
+
+function confirmForce(kind) {
+  const game = target === "All games" ? "all games" : target;
+  const copy = kind === "push"
+    ? `This replaces the server's copy for ${game} with this device's save. Every other machine will pull it.`
+    : `This discards this device's save for ${game} and takes the server's copy. Unsynced progress here is lost.`;
+  openModal(`
+    <div class="modal-title">Force ${kind} ${game}?</div>
+    <div class="modal-sub">${copy}</div>
+    <div class="modal-actions">
+      <button class="btn" data-close>Cancel</button>
+      <button class="btn danger" id="force-ok">Force ${kind}</button>
+    </div>`, { scrimClose: true });
+  $("#force-ok").addEventListener("click", () => {
+    closeModal();
+    startSync(`force ${kind}`);
+  });
+}
+
+function openAttention(id) {
+  if (id === "conflict") return conflictModal();
+  if (id === "lease") return leaseModal();
+  if (id === "dlc") return dlcModal();
+  if (id === "update") return updateModal();
+  if (id === "agent") return doctorModal();
+}
+
+function conflictModal() {
+  openModal(`
+    <div class="modal-title">Death Stranding — your save and the cloud have both changed</div>
+    <div class="modal-sub">You (and another device) both played this since you last synced. Pick which save
+      to keep — the other one is never deleted right now, just set aside.</div>
+    <div class="side-cards">
+      <div class="side-card" data-focusable id="side-local">
+        <div class="side-title">This Device</div>
+        <div class="side-when">12 minutes ago</div>
+        <div class="side-meta">6 files · 1.42 MB<br>This is the device you're using right now.</div>
+        <button class="btn side-cta" id="keep-local">Keep This Device</button>
+      </div>
+      <div class="side-card" data-focusable id="side-cloud">
+        <div class="side-title">The Cloud <span class="newer-chip">Newer</span></div>
+        <div class="side-when">8 minutes ago</div>
+        <div class="side-meta">6 files · 1.44 MB<br>from "Deck-B"</div>
+        <button class="btn side-cta" id="keep-cloud">Keep The Cloud</button>
+      </div>
+    </div>
+    <div class="row" style="margin-top:16px; padding:10px 0 0; border-top:1px solid var(--sep); cursor:default;">
+      <div class="row-main">
+        <div class="row-label">Also keep the other one as a backup</div>
+        <div class="row-desc">Never auto-deleted — restorable later from the dashboard.</div>
+      </div>
+      <div class="toggle"><i></i></div>
+    </div>`);
+  const done = (which) => {
+    closeModal();
+    dismissed.add("conflict");
+    $("#attention-rows").style.opacity = "0.5";
+    setTimeout(() => { $("#attention-rows").style.opacity = ""; attentionHtml(); render(); }, 350);
+    toast("success", `Death Stranding — conflict resolved`, `Kept ${which}`);
+  };
+  $("#keep-local").addEventListener("click", (e) => { e.stopPropagation(); done("This Device"); });
+  $("#keep-cloud").addEventListener("click", (e) => { e.stopPropagation(); done("The Cloud"); });
+  $("#side-local").addEventListener("click", () => $("#keep-local").click());
+  $("#side-cloud").addEventListener("click", () => $("#keep-cloud").click());
+}
+
+function leaseModal() {
+  openModal(`
+    <div class="modal-title">Checked out elsewhere</div>
+    <div class="modal-sub"><b style="color:var(--fg-bright)">Elden Ring</b> is open on Deck-B.
+      Playing here may cause a conflict. Dismissing only hides the notice — if the lease is still held,
+      SaveLocker records it again.</div>
+    <div class="modal-actions split">
+      <button class="btn" id="lease-dismiss">Dismiss notice</button>
+      <button class="btn" data-close>Close</button>
+    </div>`);
+  $("#lease-dismiss").addEventListener("click", () => {
+    closeModal(); dismissed.add("lease"); attentionHtml();
+    toast("info", "Notice dismissed", "It returns if the lease is still held");
+  });
+}
+
+function dlcModal() {
+  openModal(`
+    <div class="modal-title">Waiting for DLC — Halo 3</div>
+    <div class="modal-sub">The newer save was made with 2 packs (1.4 GB) this Deck does not have.
+      This Deck's save is kept; the pull goes ahead once they install.</div>
+    <div class="modal-actions stack">
+      <button class="btn" id="dlc-handover">Get Halo 3's DLC from Deck-B</button>
+      <button class="btn" id="dlc-anyway">Pull Halo 3 anyway</button>
+      <button class="btn" data-close>Close</button>
+    </div>`);
+  $("#dlc-handover").addEventListener("click", () => {
+    closeModal(); dismissed.add("dlc"); attentionHtml();
+    toast("syncing", "Asked Deck-B for Halo 3's DLC", "It installs here once sent");
+  });
+  $("#dlc-anyway").addEventListener("click", () => {
+    closeModal(); dismissed.add("dlc"); attentionHtml();
+    toast("blocked", "Pulled Halo 3 with this Deck's save", "The newer save may overwrite it on the next push");
+  });
+}
+
+function updateModal() {
+  openModal(`
+    <div class="modal-title">Install v0.3.1 now?</div>
+    <div class="modal-sub">It is already downloaded and verified. Installing restarts the agent — it takes a
+      few seconds and no game is affected.</div>
+    <div class="modal-actions">
+      <button class="btn" data-close>Later</button>
+      <button class="btn" id="update-ok">Install now</button>
+    </div>`);
+  $("#update-ok").addEventListener("click", () => {
+    closeModal();
+    busy = "install";
+    const row = SCENARIOS[state].attention.find((r) => r.id === "update");
+    row.desc = "Installing…";
+    render();
+    setTimeout(() => {
+      busy = null;
+      dismissed.add("update");
+      attentionHtml();
+      SCENARIOS[state].hero.sub = "Deck-01 · 14 games · agent v0.3.1";
+      render();
+      toast("success", "Installed. Now running v0.3.1.", "The agent restarted");
+    }, 2600);
+  });
+}
+
+function doctorModal() {
+  openModal(`
+    <div class="modal-title">Check this device</div>
+    <div class="modal-sub">SaveLocker's doctor looks at what the plugin cannot reach and says what is wrong.</div>
+    <div class="mini-label">Doctor output</div>
+    <div class="pre">savelocker doctor
+  config:      OK
+  api-token:   OK (~/.local/share/SaveLocker/api-token)
+  service:     FAILED (savelocker.service is inactive)
+  port 5178:   not listening
+  hint:        run install.sh from Desktop mode, or start the service and retry</div>
+    <div class="modal-actions">
+      <button class="btn" id="doctor-again">Run again</button>
+      <button class="btn" data-close>Close</button>
+    </div>`);
+  $("#doctor-again").addEventListener("click", () => toast("info", "Ran doctor", "Same result — the service is not running"));
+}
+
+/* ---------------------------------------------------------------------------------
+   Global wiring.
+---------------------------------------------------------------------------------- */
+document.addEventListener("click", (e) => {
+  // Gamepad semantics: whatever was pressed becomes the focused element, buttons included.
+  const el = e.target.closest("[data-focusable], button");
+  if (el && !el.hasAttribute("disabled")) setFocus(el);
+});
+
+document.addEventListener("click", (e) => {
+  const b = e.target.closest("[data-close]");
+  if (b) closeModal();
+});
+
+$("#content").addEventListener("click", (e) => {
+  const row = e.target.closest(".row[data-focusable]");
+  if (!row) return;
+  const action = row.dataset.action;
+  if (action === "target") {
+    // Stop the document-level focus delegate: it would re-focus the row right after openMenu
+    // focused the menu's current item, stripping focus out of the open menu.
+    e.stopPropagation();
+    openMenu(row, GAMES, target, (picked) => { target = picked; render(); toast("info", `Target set to ${picked}`); });
+  } else if (action === "result") {
+    const r = SCENARIOS[state].result;
+    if (r) openModal(`
+      <div class="modal-title">Last sync</div>
+      <div class="modal-sub">${r.label} · ${target}</div>
+      <div class="mini-label">Agent output</div>
+      <div class="pre">${r.lines.join("\n")}</div>
+      <div class="modal-actions"><button class="btn" data-close>Close</button></div>`);
+  } else if (action === "advanced") {
+    openModal(`
+      <div class="modal-title">Sync options</div>
+      <div class="modal-sub">${target}</div>
+      <div class="btn-row"><button class="btn primary" id="adv-sync">Sync now</button></div>
+      <div class="btn-row">
+        <button class="btn" id="adv-push">Push only</button>
+        <button class="btn" id="adv-pull">Pull only</button>
+      </div>
+      <div class="mini-label">Force — replaces one side completely</div>
+      <div class="btn-row">
+        <button class="btn danger" id="adv-force-push">Force push…</button>
+        <button class="btn danger" id="adv-force-pull">Force pull…</button>
+      </div>
+      <div class="modal-actions"><button class="btn" data-close>Close</button></div>`, { scrimClose: true });
+    $("#adv-sync").addEventListener("click", () => { closeModal(); startSync("sync"); });
+    $("#adv-push").addEventListener("click", () => { closeModal(); startSync("push"); });
+    $("#adv-pull").addEventListener("click", () => { closeModal(); startSync("pull"); });
+    $("#adv-force-push").addEventListener("click", () => confirmForce("push"));
+    $("#adv-force-pull").addEventListener("click", () => confirmForce("pull"));
+  } else if (action === "attention") {
+    openAttention(row.dataset.id);
+  } else if (action === "gaming") {
+    gamingOn = !gamingOn;
+    render();
+    toast(gamingOn ? "success" : "info", gamingOn ? "Auto-sync in Gaming Mode on" : "Auto-sync in Gaming Mode off");
+  } else if (action === "settings") {
+    toast("info", "Opens the full-screen page", "Launch options, per-game overrides and doctor live there (/savelocker)");
+  }
+});
+
+$$(".rail-tab").forEach((tab) => tab.addEventListener("click", () => {
+  if (!tab.dataset.tab) { toast("info", "Not part of this mockup", "Only the SaveLocker tab is designed here"); return; }
+  $$(".rail-tab").forEach((t) => t.classList.remove("selected"));
+  tab.classList.add("selected");
+  setFocus(tab);
+}));
+
+$("#btn-sync-now").addEventListener("click", () => startSync("sync"));
+
+$("#btn-reopen").addEventListener("click", () => {
+  document.body.classList.add("qam-open");
+  $("#reopen").classList.remove("show");
+  setTimeout(() => setFocus(focusables($("#content"))[0]), 120);
+});
+
+function setState(name) {
+  state = name;
+  target = SCENARIOS[name].target || "All games";
+  dismissed = new Set();
+  busy = SCENARIOS[name].busy || null;
+  $$("#mock .states button").forEach((b) => b.classList.toggle("active", b.dataset.state === name));
+  document.body.classList.add("qam-open");
+  $("#reopen").classList.remove("show");
+  render();
+}
+$$("#mock .states button").forEach((b) => b.addEventListener("click", () => setState(b.dataset.state)));
+
+/* Fit the 1280x800 stage to the window (never scaling above 1:1). */
+function fit() {
+  const s = Math.min(window.innerWidth / 1300, window.innerHeight / 830, 1);
+  $("#stage").style.transform = `scale(${s})`;
+}
+window.addEventListener("resize", fit);
+fit();
+
+/* Initial render: a #state hash deep-links a scenario, and an optional #state:modal part opens a
+   modal with it (used for static review screenshots). Examples:
+   mockup.html#attention  mockup.html#attention:conflict  mockup.html#healthy:advanced */
+const [hashState, hashModal] = location.hash.replace("#", "").split(":");
+setState(SCENARIOS[hashState] ? hashState : "healthy");
+setTimeout(() => {
+  if (hashModal === "advanced") $("#row-advanced").click();
+  else if (hashModal === "result") $("#row-result").click();
+  else if (hashModal === "menu") $("#row-target").click();
+  else if (hashModal) openAttention(hashModal);
+}, 350);
+setTimeout(() => setFocus(focusables($("#content"))[0]), 200);
+</script>
+</body>
+</html>
