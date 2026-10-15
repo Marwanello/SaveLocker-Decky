@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useRef, useEffect, useState } from 'react'
 import {
-  DialogButton, DropdownItem, Field, Focusable, ModalRoot, SidebarNavigation, TextField, ToggleField,
-  showModal,
+  DialogButton, DropdownItem, Field, Focusable, GamepadButton, ModalRoot, SidebarNavigation, TextField,
+  ToggleField, showModal, type GamepadEvent,
 } from '@decky/ui'
 import { callable } from '@decky/api'
 import { FaGamepad, FaHistory, FaRocket, FaShieldAlt, FaStethoscope } from 'react-icons/fa'
@@ -102,6 +102,65 @@ function Tile({ label, value }: { label: string; value: string }) {
         {value}
       </div>
     </div>
+  )
+}
+
+/** How far one stick/D-pad press scrolls a `ScrollBlock` — the same 100px Valve's own scrollable
+ * dialogs (store artwork, product-key agreement) step by. */
+const SCROLL_STEP = 100
+
+function scrollParent(el: Element): HTMLElement | null {
+  let node = el.parentElement
+  while (node) {
+    const overflowY = getComputedStyle(node).overflowY
+    if ((overflowY === 'auto' || overflowY === 'scroll') && node.scrollHeight > node.clientHeight) return node
+    node = node.parentElement
+  }
+  return null
+}
+
+/**
+ * A run of read-only content the left stick (and D-pad) can scroll through.
+ *
+ * Steam maps the left stick to the same direction events as the D-pad, and those MOVE FOCUS — so a
+ * long block with nothing focusable in it (the activity history, doctor's output, the launch-options
+ * results) was a wall: the stick had nowhere to go and the page would not move. This is Valve's own
+ * answer to the same problem, copied from its store-artwork and product-key dialogs: the block is
+ * one focus stop, and while it holds focus a direction press scrolls the page instead.
+ *
+ * It scrolls only while there is more of THIS block out of view in that direction, and otherwise
+ * returns false so Steam's normal navigation takes over — pressing down past the end of the block
+ * moves on to whatever follows it, and up past its start goes back, exactly as if it were a row.
+ */
+function ScrollBlock({ children }: { children: React.ReactNode }) {
+  const ref = useRef<HTMLDivElement>(null)
+
+  const onDirection = (e: GamepadEvent): boolean => {
+    const el = ref.current
+    if (!el) return false
+    const scroller = scrollParent(el)
+    if (!scroller) return false
+    const block = el.getBoundingClientRect()
+    const view = scroller.getBoundingClientRect()
+    if (e.detail.button === GamepadButton.DIR_DOWN && block.bottom > view.bottom + 2) {
+      scroller.scrollBy({ top: SCROLL_STEP, behavior: 'smooth' })
+      return true
+    }
+    if (e.detail.button === GamepadButton.DIR_UP && block.top < view.top - 2) {
+      scroller.scrollBy({ top: -SCROLL_STEP, behavior: 'smooth' })
+      return true
+    }
+    return false
+  }
+
+  return (
+    // `onGamepadDirection` is typed as returning void, but Steam reads the return value: true
+    // consumes the press, false lets navigation have it (see Valve's own handlers this mirrors).
+    // `focusable` is Valve's own Focusable prop (a Focusable with no handler is otherwise not a
+    // navigation target); @decky/ui does not type it, hence the spread.
+    <Focusable ref={ref} {...{ focusable: true }} noFocusRing onGamepadDirection={onDirection as (e: GamepadEvent) => void}>
+      {children}
+    </Focusable>
   )
 }
 
@@ -723,6 +782,7 @@ function LaunchOptionsPage() {
         <div style={{ ...DIM, opacity: 0.8, marginBottom: '10px' }}>{summarise(outcomes)}</div>
       )}
 
+      <ScrollBlock>
       {outcomes.map((o) => (
         <Field
           key={o.name}
@@ -745,6 +805,7 @@ function LaunchOptionsPage() {
           ) : undefined}
         />
       ))}
+      </ScrollBlock>
     </Section>
   )
 }
@@ -772,6 +833,7 @@ function ActivityPage() {
   return (
     <Section title="Recent activity">
       {entries.length === 0 && <div style={DIM}>Nothing yet.</div>}
+      <ScrollBlock>
       {entries.map((e, i) => (
         <Field
           key={i}
@@ -780,6 +842,7 @@ function ActivityPage() {
           description={timeAgo(e.timestampUtc)}
         />
       ))}
+      </ScrollBlock>
     </Section>
   )
 }
@@ -827,7 +890,7 @@ function DiagnosticsPage() {
       )}
 
       {result && (
-        <div>
+        <ScrollBlock>
           <div style={{ ...DIM, marginBottom: '8px' }}>
             {result.exitCode === 0 ? 'No problems found.' : `Exited ${result.exitCode} — see below.`}
           </div>
@@ -843,7 +906,7 @@ function DiagnosticsPage() {
               </div>
             ))}
           </div>
-        </div>
+        </ScrollBlock>
       )}
     </Section>
   )

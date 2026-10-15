@@ -1,9 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   ButtonItem, ConfirmModal, DialogButton, DropdownItem, Field, Focusable, ModalRoot, Navigation, PanelSection,
   PanelSectionRow, showModal, staticClasses,
 } from '@decky/ui'
-import { callable, definePlugin, routerHook, toaster } from '@decky/api'
+import { callable, definePlugin, routerHook, toaster, useQuickAccessVisible } from '@decky/api'
 import { FaChevronRight, FaGamepad } from 'react-icons/fa'
 import { GamingSyncToggle, registerGamingModeSync, setConflictHooks, unregisterGamingModeSync } from './gamingSync'
 import { classifySyncOutput } from './syncStatus'
@@ -430,7 +430,8 @@ type Reach = { kind: 'loading' } | { kind: 'ok' } | { kind: 'down'; reason: stri
  * One focusable block, same reason the old Status block was one: the QAM scrolls by moving focus,
  * and a non-focusable block at the top is a hole the D-pad cannot land in.
  */
-function Hero({ reach, state, version, activity, busy }: {
+function Hero({ reach, state, version, activity, busy, heroRef }: {
+  heroRef: React.RefObject<HTMLDivElement | null>
   reach: Reach
   state: AgentState | null
   version: AgentVersion | null
@@ -485,7 +486,14 @@ function Hero({ reach, state, version, activity, busy }: {
   return (
     <PanelSection>
       <PanelSectionRow>
-        <Field focusable bottomSeparator="none" childrenLayout="below" childrenContainerWidth="max">
+        <Field
+          ref={heroRef}
+          focusable
+          preferredFocus
+          bottomSeparator="none"
+          childrenLayout="below"
+          childrenContainerWidth="max"
+        >
           <div style={{ background: '#23262e', borderRadius: '2px', padding: '12px 14px' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '9px' }}>
               <Dot kind={kind} />
@@ -511,6 +519,28 @@ function Hero({ reach, state, version, activity, busy }: {
   )
 }
 
+/**
+ * Every time the panel opens, start at the top: focus on the hero, every scrollable ancestor at 0.
+ *
+ * Decky keeps this content mounted while the QAM is closed, and Steam restores focus to whatever
+ * was focused last when the panel reopens — usually the bottom row, because "Settings and
+ * diagnostics" is the last thing pressed before leaving. The panel then opened scrolled to its end
+ * (reported on hardware). `preferredFocus` on the hero covers entry with no remembered focus; this
+ * covers the restore. The focus move goes through the DOM — Steam's gamepad navigation follows
+ * DOM focus — and the scroll reset runs again a frame and a beat later, because the restore that
+ * it is undoing lands asynchronously after the visibility change.
+ */
+function resetQamToTop(hero: HTMLDivElement | null): void {
+  if (!hero) return
+  const target = hero.matches('[tabindex]') ? hero : hero.querySelector<HTMLElement>('[tabindex]')
+  if (target && !target.contains(document.activeElement)) target.focus({ preventScroll: true })
+  let node: Element | null = hero.parentElement
+  while (node) {
+    if (node.scrollHeight > node.clientHeight) node.scrollTop = 0
+    node = node.parentElement
+  }
+}
+
 function Content() {
   const [state, setState] = useState<AgentState | null>(null)
   const [reach, setReach] = useState<Reach>({ kind: 'loading' })
@@ -525,6 +555,16 @@ function Content() {
   const run = useSyncRun()
   const conflicts = useOpenConflicts()
   const { holds, refresh: refreshHolds } = useDlcHolds()
+  const heroRef = useRef<HTMLDivElement>(null)
+  const qamVisible = useQuickAccessVisible()
+
+  useEffect(() => {
+    if (!qamVisible) return
+    resetQamToTop(heroRef.current)
+    const raf = requestAnimationFrame(() => resetQamToTop(heroRef.current))
+    const timer = setTimeout(() => resetQamToTop(heroRef.current), 150)
+    return () => { cancelAnimationFrame(raf); clearTimeout(timer) }
+  }, [qamVisible])
 
   const refreshStatus = async () => {
     const [s, v, g] = await Promise.all([fetchState(), fetchVersion(), fetchGames()])
@@ -630,7 +670,7 @@ function Content() {
 
   return (
     <>
-      <Hero reach={reach} state={state} version={version} activity={activity} busy={run.busy} />
+      <Hero heroRef={heroRef} reach={reach} state={state} version={version} activity={activity} busy={run.busy} />
 
       {/* Only exists when something does. Each item is ONE focus stop whose press opens its own
           flow — the old panel gave every item a read-only row plus a button row, and listed the
