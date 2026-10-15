@@ -42,6 +42,14 @@ the user-facing rationale, manual install, and debug routes — read it before a
   output from the agent's own log phrases via `syncStatus.tsx`'s `classifySyncOutput`.
 - `SteamClient` members are undocumented Valve internals; declare only what is used in
   `src/steam.d.ts` and guard calls that may not exist.
+- Plugin code runs in Steam's `SharedJSContext`, but the QAM and the full page render in OTHER
+  windows (`QuickAccess_uid*`, `Steam Big Picture Mode`). The global `document` /
+  `getComputedStyle` are SharedJSContext's own: look elements up from a ref and read styles through
+  `el.ownerDocument.defaultView`. A global `document.querySelector` silently finds nothing.
+- Right stick: Steam's navigation only maps the LEFT stick to directions. The right stick arrives
+  as `SteamClient.Input` analog messages (action 47, `GAMEPAD_ANALOG_SCROLL`) only while
+  `EnableControllerAnalogInputMessages(true)` is on, and x/y are a running mouse-style total
+  (~3,200 units/s at full tilt; stick up lowers y) — scroll by the delta. See `useRightStickScroll`.
 
 ## Layout notes
 
