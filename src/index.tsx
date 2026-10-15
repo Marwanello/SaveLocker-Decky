@@ -533,7 +533,7 @@ function Hero({ reach, state, version, activity, busy, heroRef }: {
 function resetQamToTop(hero: HTMLDivElement | null): void {
   if (!hero) return
   const target = hero.matches('[tabindex]') ? hero : hero.querySelector<HTMLElement>('[tabindex]')
-  if (target && !target.contains(document.activeElement)) target.focus({ preventScroll: true })
+  if (target && !target.contains(hero.ownerDocument.activeElement)) target.focus({ preventScroll: true })
   let node: Element | null = hero.parentElement
   while (node) {
     if (node.scrollHeight > node.clientHeight) node.scrollTop = 0

@@ -109,10 +109,18 @@ function Tile({ label, value }: { label: string; value: string }) {
  * dialogs (store artwork, product-key agreement) step by. */
 const SCROLL_STEP = 100
 
+/**
+ * The nearest ancestor that actually scrolls.
+ *
+ * Styles are read through the element's OWN window: this plugin's code runs in Steam's
+ * SharedJSContext, while the page renders in the separate Big Picture window, so the global
+ * `getComputedStyle` / `document` here belong to a different document than the elements do.
+ */
 function scrollParent(el: Element): HTMLElement | null {
+  const view = el.ownerDocument.defaultView ?? window
   let node = el.parentElement
   while (node) {
-    const overflowY = getComputedStyle(node).overflowY
+    const overflowY = view.getComputedStyle(node).overflowY
     if ((overflowY === 'auto' || overflowY === 'scroll') && node.scrollHeight > node.clientHeight) return node
     node = node.parentElement
   }
@@ -176,10 +184,14 @@ const STICK_MAX_STEP = 200
 /** Which way is up — see `useRightStickScroll`. */
 const STICK_UP_IS_POSITIVE = true
 
-/** The scroll container of whichever page is showing — found from its own marker, since Steam's
- * container classes are build-hashed and only the active page's content is mounted. */
-function activePageScroller(): HTMLElement | null {
-  const marker = Array.from(document.querySelectorAll('.savelocker-page')).find((el) => (el as HTMLElement).offsetParent !== null)
+/** The scroll container of whichever page is showing — found from its own marker under this
+ * page's root, since Steam's container classes are build-hashed and only the active page's content
+ * is mounted. Searched from `root`, never the global `document`: that is SharedJSContext's own empty
+ * document, not the Big Picture window this page renders in (measured on a Deck — the global lookup
+ * found 0 pages, which is why the first right-stick build scrolled nothing at all). */
+function activePageScroller(root: HTMLElement | null): HTMLElement | null {
+  if (!root) return null
+  const marker = Array.from(root.querySelectorAll<HTMLElement>('.savelocker-page')).find((el) => el.offsetParent !== null)
   return marker ? scrollParent(marker) : null
 }
 
@@ -207,7 +219,7 @@ function activePageScroller(): HTMLElement | null {
  * Direction: the total's sign convention is not documented; `STICK_UP_IS_POSITIVE` follows the
  * capture's first push. Flip it if the stick scrolls the wrong way.
  */
-function useRightStickScroll(): void {
+function useRightStickScroll(rootRef: React.RefObject<HTMLDivElement | null>): void {
   useEffect(() => {
     const input = SteamClient.Input
     if (!input?.RegisterForControllerAnalogInputMessages || !input.EnableControllerAnalogInputMessages) return
@@ -220,7 +232,7 @@ function useRightStickScroll(): void {
       frame = null
       const units = pending
       pending = 0
-      const scroller = activePageScroller()
+      const scroller = activePageScroller(rootRef.current)
       if (!scroller || units === 0) return
       const px = units * STICK_PX_PER_UNIT
       scroller.scrollTop += STICK_UP_IS_POSITIVE ? -px : px
@@ -1008,8 +1020,7 @@ function DiagnosticsPage() {
  * changes), so a single reset immediately on mount can be undone a frame or two later by the same
  * thing this is working around.
  */
-function resetFullPageScroll(): void {
-  const root = document.querySelector('.savelocker-fullpage')
+function resetFullPageScroll(root: HTMLElement | null): void {
   let node: Element | null = root
   while (node) {
     if (node.scrollHeight > node.clientHeight) node.scrollTop = 0
@@ -1044,17 +1055,19 @@ const pageRoute = (page: string) => `${SAVELOCKER_PAGE_ROUTE}/${page}`
 const page = (content: React.ReactNode) => <div className="savelocker-page">{content}</div>
 
 export function FullPage() {
-  useRightStickScroll()
+  const rootRef = useRef<HTMLDivElement>(null)
+  useRightStickScroll(rootRef)
 
   useEffect(() => {
-    resetFullPageScroll()
-    const raf = requestAnimationFrame(resetFullPageScroll)
-    const timer = setTimeout(resetFullPageScroll, 300)
+    const reset = () => resetFullPageScroll(rootRef.current)
+    reset()
+    const raf = requestAnimationFrame(reset)
+    const timer = setTimeout(reset, 300)
     return () => { cancelAnimationFrame(raf); clearTimeout(timer) }
   }, [])
 
   return (
-    <div className="savelocker-fullpage" style={{ height: '100%', minHeight: '100%' }}>
+    <div ref={rootRef} className="savelocker-fullpage" style={{ height: '100%', minHeight: '100%' }}>
       {/* SidebarNavigation is Steam's own PagedSettingsDialog (see @decky/ui's resolution in
           SidebarNavigation.js): title and page list on the left, the active page's content on the
           right, with Valve's focus/scroll handling. Only the active page's content mounts, so each
