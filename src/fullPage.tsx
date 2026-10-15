@@ -166,14 +166,14 @@ function ScrollBlock({ children }: { children: React.ReactNode }) {
 
 /** `EAnalogInput` value Steam sends for its gamepad-UI scroll binding — the right stick. */
 const GAMEPAD_ANALOG_SCROLL = 47
-/** Below this deflection the stick is resting, not asking to scroll (sticks never read exactly 0). */
-const STICK_DEADZONE = 0.15
-/** Pixels per frame at full deflection — about 1100 px/s at 60 fps, a long page in a second or two. */
-const STICK_MAX_SPEED = 18
-/** A held stick keeps reporting; silence this long means the message stream stopped, so stop with it
- * rather than scrolling forever on the last value seen. */
-const STICK_STALE_MS = 150
-/** Which way up is on the y axis — see `useRightStickScroll`. */
+/** Page pixels per unit of stick travel. Measured on a Deck: full deflection advances the running
+ * total by ~3,200 units/s, so 0.45 is ~1,450 px/s flat out — a long doctor run in a second or two,
+ * while a light push still moves a line at a time. */
+const STICK_PX_PER_UNIT = 0.45
+/** A jump this large between two messages ~2 ms apart is the total being reset (analog messages
+ * re-enabled, controller reconnected), not stick travel — dropped rather than scrolled. */
+const STICK_MAX_STEP = 200
+/** Which way is up — see `useRightStickScroll`. */
 const STICK_UP_IS_POSITIVE = true
 
 /** The scroll container of whichever page is showing — found from its own marker, since Steam's
@@ -187,46 +187,54 @@ function activePageScroller(): HTMLElement | null {
  * Right-stick scrolling for the whole page, independent of focus.
  *
  * Steam's navigation only ever turns the LEFT stick into direction presses (its button map has no
- * right-stick directions). The right stick arrives as `GAMEPAD_ANALOG_SCROLL` analog messages, and
- * only while analog messages are enabled — which Steam does for its own virtual keyboard and
- * nothing else — so this enables them for as long as the page is open and scrolls by deflection,
- * smoothly, while the stick is held. Focus does not move, exactly like scrolling with a trackpad.
+ * right-stick directions). In the Steam UI's own controller layout (`basicui_neptune.vdf`) the right
+ * stick is a `joystick_mouse` group feeding the "Scroll" analog action, which reaches this JS as
+ * `GAMEPAD_ANALOG_SCROLL` messages — only while analog messages are enabled, which Steam does for its
+ * own virtual keyboard and nothing else, and which its navigation then ignores. So this page enables
+ * them for as long as it is open and scrolls itself. Focus does not move, exactly like a trackpad.
+ *
+ * Captured on hardware: the messages arrive every ~2 ms and x/y are a RUNNING TOTAL, mouse-style —
+ * not a stick position. Holding the stick keeps the total climbing (~3,200 units/s at full tilt),
+ * the other way runs it down, and a resting stick stops sending. The scroll is therefore the change
+ * between consecutive messages, batched into one `scrollTop` write per frame. (The first version
+ * read `y` as a -1..1 position and scaled anything larger down by 32767, which put every real
+ * reading under its dead zone — the right stick did nothing at all.)
  *
  * Re-enabled once a second: opening the virtual keyboard (the Games search, an alias edit) turns
  * analog messages ON and closing it turns them OFF again, which would otherwise silently end right-
  * stick scrolling for the rest of the visit. Disabled on leaving, to hand the setting back as found.
  *
- * The y sign (stick up = positive, scroll up) and the value range are not documented anywhere; a
- * value outside ±1 is treated as a raw int16 axis. Unverified on hardware — if the direction is
- * inverted on a Deck, flip `STICK_UP_IS_POSITIVE`.
+ * Direction: the total's sign convention is not documented; `STICK_UP_IS_POSITIVE` follows the
+ * capture's first push. Flip it if the stick scrolls the wrong way.
  */
 function useRightStickScroll(): void {
   useEffect(() => {
     const input = SteamClient.Input
     if (!input?.RegisterForControllerAnalogInputMessages || !input.EnableControllerAnalogInputMessages) return
 
-    let y = 0
-    let lastMessage = 0
+    let lastY: number | null = null
+    let pending = 0
     let frame: number | null = null
 
-    const tick = () => {
+    const flush = () => {
       frame = null
-      if (Date.now() - lastMessage > STICK_STALE_MS) y = 0
-      if (Math.abs(y) < STICK_DEADZONE) return
+      const units = pending
+      pending = 0
       const scroller = activePageScroller()
-      if (scroller) {
-        const speed = ((Math.abs(y) - STICK_DEADZONE) / (1 - STICK_DEADZONE)) * STICK_MAX_SPEED
-        const up = STICK_UP_IS_POSITIVE ? y > 0 : y < 0
-        scroller.scrollTop += up ? -speed : speed
-      }
-      frame = requestAnimationFrame(tick)
+      if (!scroller || units === 0) return
+      const px = units * STICK_PX_PER_UNIT
+      scroller.scrollTop += STICK_UP_IS_POSITIVE ? -px : px
     }
 
-    const reg = input.RegisterForControllerAnalogInputMessages((_controller, action, _active, _x, rawY) => {
+    const reg = input.RegisterForControllerAnalogInputMessages((_controller, action, _active, _x, y) => {
       if (action !== GAMEPAD_ANALOG_SCROLL) return
-      y = Math.abs(rawY) > 1 ? rawY / 32767 : rawY
-      lastMessage = Date.now()
-      if (frame === null && Math.abs(y) >= STICK_DEADZONE) frame = requestAnimationFrame(tick)
+      const prev = lastY
+      lastY = y
+      if (prev === null) return
+      const step = y - prev
+      if (Math.abs(step) > STICK_MAX_STEP) return
+      pending += step
+      if (frame === null) frame = requestAnimationFrame(flush)
     })
     input.EnableControllerAnalogInputMessages(true)
     const keepEnabled = setInterval(() => input.EnableControllerAnalogInputMessages?.(true), 1000)
