@@ -95,6 +95,21 @@ declare const SteamClient: {
       callback: (data: SaveLockerAppLifetimeNotification) => void,
     ): SaveLockerUnregisterable
   }
+  /**
+   * Analog controller input, as Steam's own gamepad input source consumes it (steamui
+   * chunk~2dcc5aaf7.js): the same `(controllerIndex, eAction, bActive, x, y)` callback serves both
+   * the button and the analog registrations, and analog messages only flow while
+   * `EnableControllerAnalogInputMessages(true)` is in effect — Steam's virtual keyboard turns them
+   * on when it mounts and off when it unmounts. `eAction` 47 is `GAMEPAD_ANALOG_SCROLL`, which
+   * Steam's own navigation receives and deliberately ignores. Optional: absent on clients that
+   * predate it, and every call site guards for that.
+   */
+  Input?: {
+    RegisterForControllerAnalogInputMessages?(
+      callback: (controllerIndex: number, eAction: number, bActive: boolean, x: number, y: number) => void,
+    ): SaveLockerUnregisterable
+    EnableControllerAnalogInputMessages?(enable: boolean): void
+  }
 }
 
 declare const appStore: {

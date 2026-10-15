@@ -1,0 +1,900 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SaveLocker settings — Option B: Game-first (master–detail)</title>
+<!--
+  SETTINGS REDESIGN — OPTION B of 3: "Game-first".
+
+  Most of what this page configures is per-game (alias, pull-before-launch, sync-on-page-open,
+  conflict policy, launch-option status), yet the shipped page makes every game a dense stack of
+  five controls inside a 320px scroller and hides the global settings behind a second tab. This
+  option inverts that: the game list is a master column, the selected game's full configuration is
+  the detail pane, and nothing about a game needs a dialog or a page switch. Only fleet-wide
+  material ("This Deck") lives on a second tab.
+
+  Chrome values are Valve's, extracted from the gamepad UI stylesheet:
+    - page background:  radial-gradient(155.42% 100% at 0% 0%, #060a0e 0%, #0e141b 100%)
+    - pill tabs:        uppercase 12px/22 bold, letter-spacing .5px; hover rgba(255,255,255,.15);
+                        active rgba(189,197,206,.48) + #fff; focus #fff bg + #23262e text with
+                        0 3px 6px rgba(0,0,0,.32) (GamepadTabbedPage's own tab values)
+    - list selection:   the PagedSettingsDialog treatment — active rgba(26,159,255,.22) gradient,
+                        focus rgba(26,159,255,.4) gradient with a 2px #1a9fff left border
+    - rows/buttons/toggles/inputs/modals: the QAM mockup's extracted tokens, unchanged.
+
+  WHY THIS OPTION: zero context switches for the work people actually do; the left list doubles as
+  a status board (every game's state visible at once); search stays one stop away. Cost: the global
+  page is a long scroll, and the screen carries two navigation systems (tabs + list).
+-->
+<style>
+@font-face { font-family: "Motiva Sans"; font-weight: 400; font-style: normal;
+  src: url("https://community.cloudflare.steamstatic.com/public/shared/fonts/MotivaSans-Regular.ttf") format("truetype"); }
+@font-face { font-family: "Motiva Sans"; font-weight: 500; font-style: normal;
+  src: url("https://community.cloudflare.steamstatic.com/public/shared/fonts/MotivaSans-Medium.ttf") format("truetype"); }
+@font-face { font-family: "Motiva Sans"; font-weight: 700; font-style: normal;
+  src: url("https://community.cloudflare.steamstatic.com/public/shared/fonts/MotivaSans-Bold.ttf") format("truetype"); }
+
+:root {
+  --page-bg-a: #060a0e;
+  --page-bg-b: #0e141b;
+  --list-bg: #171b21;
+  --qam-border: #23262e;
+  --field-focus-bg: #3d4450;
+  --fg: #dcdedf;
+  --fg-bright: #fff;
+  --fg-dim: rgba(255, 255, 255, .6);
+  --fg-faint: rgba(255, 255, 255, .4);
+  --icon: #8b929a;
+  --icon-disabled: #67707b;
+  --sep: rgba(255, 255, 255, .1);
+  --btn: rgba(255, 255, 255, .15);
+  --btn-hover: rgba(255, 255, 255, .2);
+  --btn-focus-fg: #23262e;
+  --accent: #1a9fff;
+  --danger: #de3618;
+  --k-syncing-bg: #2a3a45;  --k-syncing-fg: #7fb8e0;
+  --k-success-bg: #1e3a2a;  --k-success-fg: #6fce9a;
+  --k-blocked-bg: #3a2f16;  --k-blocked-fg: #e0b355;
+  --k-error-bg:   #3a1e1e;  --k-error-fg:   #e07272;
+  --k-warning-bg: #2f2440;  --k-warning-fg: #b596e6;
+  --k-info-bg:    #26292c;  --k-info-fg:    #9a9a96;
+  --k-conflict-bg:#3a1a2e;  --k-conflict-fg:#e0578f;
+}
+
+* { box-sizing: border-box; }
+.hidden { display: none !important; }
+html, body { margin: 0; padding: 0; height: 100%; background: #05070a;
+  font-family: "Motiva Sans", Helvetica, Arial, sans-serif; -webkit-font-smoothing: antialiased; }
+body { display: flex; align-items: center; justify-content: center; overflow: hidden; }
+
+#stage { position: relative; width: 1280px; height: 800px; flex: none; overflow: hidden;
+  transform-origin: center center; box-shadow: 0 30px 120px rgba(0, 0, 0, .8), 0 0 0 1px rgba(255, 255, 255, .06);
+  background: radial-gradient(155.42% 100% at 0% 0%, var(--page-bg-a) 0%, var(--page-bg-b) 100%);
+  display: flex; flex-direction: column; }
+
+#statusbar { position: absolute; top: 0; left: 0; right: 0; height: 48px; z-index: 60;
+  display: flex; align-items: center; justify-content: flex-end; gap: 18px; padding-right: 24px;
+  color: #fff; font-size: 16px; pointer-events: none; }
+#statusbar svg { display: block; }
+#statusbar .battery { display: flex; align-items: center; gap: 6px; font-weight: 500; }
+#statusbar .clock { font-weight: 500; letter-spacing: .3px; min-width: 74px; text-align: right; }
+
+/* Page header: back button + title, then centered pill tabs (58px row, fade-masked). */
+#pagehead { flex: none; display: flex; align-items: center; gap: 12px; padding: 54px 2.8vw 0; }
+.backbtn { width: 34px; height: 34px; display: flex; align-items: center; justify-content: center;
+  border-radius: 50%; color: #fff; cursor: pointer; outline: none; flex: none; }
+.backbtn:hover { background: rgba(255, 255, 255, .1); }
+.backbtn.gpfocus, .backbtn:focus { background: #fff; color: var(--btn-focus-fg); }
+.backbtn svg { width: 24px; height: 24px; }
+.ptitle { font-size: 22px; line-height: 28px; font-weight: 700; color: #fff; }
+
+#tabrow { flex: none; height: 58px; display: flex; align-items: center; justify-content: center;
+  gap: 6px; -webkit-mask-image: linear-gradient(to right, transparent, black 24px, black calc(100% - 24px), transparent); }
+.ptab { font-size: 12px; line-height: 22px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase;
+  padding: 2px 14px; border-radius: 11px; color: rgba(255, 255, 255, .75); cursor: pointer; outline: none;
+  transition: background-color 150ms ease-in, color 150ms ease-in; }
+.ptab:hover { background: rgba(255, 255, 255, .15); color: #fff; }
+.ptab.active { background: rgba(189, 197, 206, .48); color: #fff; }
+.ptab.gpfocus, .ptab:focus { background: #fff; color: var(--btn-focus-fg); box-shadow: 0 3px 6px rgba(0, 0, 0, .32); }
+
+#body { flex: 1; min-height: 0; display: flex; padding-bottom: 40px; }
+
+/* Games tab: master list + detail pane. */
+#games-tab { flex: 1; display: flex; min-height: 0; }
+#glist-col { flex: none; width: 372px; display: flex; flex-direction: column; min-height: 0;
+  background: var(--list-bg); border-right: 1px solid rgba(0, 0, 0, .4); }
+#gsearch { margin: 14px 14px 10px; }
+.gitem { position: relative; display: flex; align-items: center; gap: 12px; padding: 11px 20px;
+  cursor: pointer; outline: none; border-left: 2px solid transparent; }
+.gitem:hover { background: rgba(255, 255, 255, .05); }
+.gitem.selected { color: #fff; background: linear-gradient(90deg, rgba(26, 159, 255, .22), rgba(26, 159, 255, 0)); }
+.gitem.gpfocus, .gitem:focus { color: #fff; background: linear-gradient(90deg, rgba(26, 159, 255, .4), rgba(26, 159, 255, 0)); border-left: 2px solid var(--accent); }
+.gitem .g-main { flex: 1; min-width: 0; }
+.gitem .g-name { font-size: 16px; line-height: 20px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gitem .g-sub { font-size: 12px; line-height: 16px; color: var(--fg-dim); margin-top: 1px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.gitem.selected .g-sub, .gitem.gpfocus .g-sub { color: rgba(255, 255, 255, .75); }
+#gcount { padding: 0 20px 10px; font-size: 12px; color: var(--fg-faint); }
+
+#detail-col { flex: 1; overflow-y: auto; scrollbar-width: none; padding: 20px 2.8vw 40px; }
+#detail-col::-webkit-scrollbar { display: none; }
+#dhead { position: sticky; top: -20px; background: linear-gradient(var(--page-bg-b) 82%, transparent);
+  padding: 6px 0 12px; z-index: 5; }
+#dtitle { font-size: 22px; line-height: 28px; font-weight: 700; color: #fff; display: flex; align-items: center; gap: 10px; }
+#dsub { font-size: 12px; color: var(--fg-dim); margin-top: 2px; }
+#dactions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+
+/* This Deck tab. */
+#deck-tab { flex: 1; overflow-y: auto; scrollbar-width: none; padding: 8px 2.8vw 40px; }
+#deck-tab::-webkit-scrollbar { display: none; }
+#deck-inner { max-width: 880px; }
+
+/* Shared field/row/button/toggle/input tokens (QAM mockup extraction). */
+.sec { margin: 0 0 28px; }
+.sec-title { font-size: 16px; line-height: 20px; font-weight: 600; letter-spacing: .5px;
+  text-transform: uppercase; color: rgba(255, 255, 255, .7); padding: 0 0 8px; }
+.row { position: relative; display: flex; align-items: center; gap: 12px; padding: 12px 0; border-radius: 2px;
+  color: var(--fg); outline: none; }
+.row + .row::before { content: ""; position: absolute; top: 0; left: 0; right: 0; height: 1px; background: var(--sep); }
+.row[data-focusable] { cursor: pointer; }
+.row[data-focusable]:hover { background: rgba(255, 255, 255, .04); }
+.row[data-focusable].gpfocus, .row[data-focusable]:focus { background: var(--field-focus-bg); }
+.row[data-focusable].gpfocus .row-label, .row[data-focusable]:focus .row-label { color: var(--fg-bright); }
+.row-main { flex: 1; min-width: 0; }
+.row-label { font-size: 16px; line-height: 20px; }
+.row-desc { font-size: 12px; line-height: 16px; color: var(--fg-dim); margin-top: 2px; }
+.row-value { font-size: 16px; color: var(--fg-dim); white-space: nowrap; max-width: 55%; overflow: hidden; text-overflow: ellipsis; }
+.chev { flex: none; width: 16px; height: 16px; color: var(--icon); }
+.chev.down { transform: rotate(90deg); }
+.dot { flex: none; width: 9px; height: 9px; border-radius: 50%; }
+.dot.ok { background: var(--k-success-fg); }
+.dot.conflict { background: var(--k-conflict-fg); }
+.dot.warning { background: var(--k-warning-fg); }
+.dot.blocked { background: var(--k-blocked-fg); }
+.dot.info { background: var(--k-info-fg); }
+
+.btn { display: block; width: 100%; padding: 10px 24px; margin: 0; font-family: inherit;
+  font-size: 16px; line-height: 20px; color: var(--fg); background: var(--btn); border: 0; border-radius: 2px;
+  text-align: center; cursor: pointer; outline: none; transition: background-color .15s ease-in, color .15s ease-in; }
+.btn:hover { background: var(--btn-hover); }
+.btn.gpfocus, .btn:focus { background: #fff; color: var(--btn-focus-fg); }
+.btn.primary.gpfocus, .btn.primary:focus { background: var(--accent); color: #fff; }
+.btn.danger.gpfocus, .btn.danger:focus { background: var(--danger); color: #fff; }
+.btn[disabled] { opacity: .4; background: #131418; color: #fff; pointer-events: none; }
+.btn.compact { width: auto; padding: 6px 14px; font-size: 14px; line-height: 18px; flex: none; }
+.btn-row { display: flex; gap: 10px; margin-top: 10px; }
+.btn-row.right { justify-content: flex-end; }
+.btn-row.right .btn { width: auto; min-width: 150px; flex: none; }
+
+.toggle { flex: none; width: 38px; height: 22px; border-radius: 16px; position: relative;
+  background: hsla(0, 0%, 100%, .15); transition: background-color .2s ease-out; }
+.toggle > i { position: absolute; left: 0; top: 0; bottom: 0; width: 22px; border-radius: 50%;
+  background: #fff; box-shadow: 0 0 5px rgba(0, 0, 0, .35); transition: transform .2s cubic-bezier(.1, .12, .53, 1.72); }
+.toggle.on { background: var(--accent); }
+.toggle.on > i { transform: translateX(16px); }
+.row[data-focusable].gpfocus .toggle, .row[data-focusable]:focus .toggle { box-shadow: 0 0 0 4px rgba(255, 255, 255, .3); }
+.row[data-focusable].gpfocus .toggle:not(.on), .row[data-focusable]:focus .toggle:not(.on) { background: var(--qam-border); }
+.row[data-focusable].gpfocus .toggle:not(.on) > i, .row[data-focusable]:focus .toggle:not(.on) > i {
+  border: 2px solid var(--icon-disabled); margin: -2px; }
+
+.input { display: block; width: 100%; padding: 10px 16px; font-family: inherit; font-size: 16px;
+  line-height: 20px; color: #fff; background: hsla(0, 0%, 100%, .1); border: 0; border-radius: 0; outline: none; }
+.input::placeholder { font-style: italic; color: var(--icon-disabled); }
+.input:focus { background: #fff; color: #000; }
+.input:focus::placeholder { color: #67707b; }
+
+.chip { flex: none; display: inline-flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 700;
+  letter-spacing: .5px; text-transform: uppercase; padding: 2px 8px; border-radius: 10px; white-space: nowrap; }
+.chip.ok { color: var(--k-success-fg); background: var(--k-success-bg); }
+.chip.conflict { color: var(--k-conflict-fg); background: var(--k-conflict-bg); }
+.chip.blocked { color: var(--k-blocked-fg); background: var(--k-blocked-bg); }
+.chip.info { color: var(--k-info-fg); background: var(--k-info-bg); }
+.chip.syncing { color: var(--k-syncing-fg); background: var(--k-syncing-bg); }
+.note { font-size: 12px; line-height: 16px; color: var(--fg-dim); padding: 4px 0; }
+.empty { font-size: 14px; color: var(--fg-dim); padding: 10px 0; }
+
+.tiles { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
+.tile { background: rgba(255, 255, 255, .05); border-radius: 2px; padding: 12px 14px; }
+.tile .t-label { font-size: 11px; letter-spacing: .5px; text-transform: uppercase; color: var(--fg-faint); }
+.tile .t-value { font-size: 18px; color: var(--fg-bright); margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+#menu-root { position: absolute; inset: 0; z-index: 150; display: none; }
+#menu-root.open { display: block; }
+.menu-pop { position: absolute; width: 292px; max-height: 420px; overflow-y: auto; scrollbar-width: none;
+  background: var(--qam-border); border-radius: 3px; padding: 4px 0;
+  box-shadow: 0 10px 34px rgba(0, 0, 0, .6), 0 0 0 1px rgba(0, 0, 0, .4); }
+.menu-pop::-webkit-scrollbar { display: none; }
+.menu-item { padding: 9px 16px; font-size: 16px; color: var(--fg); cursor: pointer; outline: none; white-space: nowrap; }
+.menu-item:hover { background: rgba(255, 255, 255, .1); }
+.menu-item.gpfocus, .menu-item:focus { background: #fff; color: var(--btn-focus-fg); }
+
+#modal-root { position: absolute; inset: 0; z-index: 100; display: none; }
+#modal-root.open { display: block; }
+.modal-scrim { position: absolute; inset: 0; background: rgba(0, 0, 0, .85); backdrop-filter: blur(3px);
+  display: flex; align-items: center; justify-content: center; }
+.modal { width: 660px; max-height: 700px; overflow-y: auto; scrollbar-width: none;
+  background: var(--page-bg-b); border: 2px solid var(--qam-border); padding: 30px 36px;
+  animation: modalin .5s cubic-bezier(.16, .86, .43, .99) both; }
+.modal::-webkit-scrollbar { display: none; }
+@keyframes modalin { from { transform: translateY(26px); opacity: 0; } to { transform: none; opacity: 1; } }
+.modal-title { font-size: 22px; line-height: 28px; font-weight: 700; color: #fff; margin-bottom: 6px; }
+.modal-sub { font-size: 14px; line-height: 20px; color: var(--fg-dim); margin-bottom: 16px; }
+.modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 24px; }
+.modal-actions .btn { width: auto; min-width: 150px; flex: none; }
+.mini-label { font-size: 12px; font-weight: 700; letter-spacing: .8px; text-transform: uppercase;
+  color: var(--fg-faint); margin: 18px 0 6px; }
+.pre { font-size: 12px; line-height: 17px; color: var(--fg-dim); white-space: pre-wrap; word-break: break-word;
+  background: #0a0e13; border: 1px solid var(--qam-border); border-radius: 2px; padding: 10px 12px;
+  max-height: 220px; overflow-y: auto; scrollbar-width: none; }
+.pre::-webkit-scrollbar { display: none; }
+
+#toast-root { position: absolute; right: 16px; bottom: 56px; z-index: 200;
+  display: flex; flex-direction: column; gap: 10px; pointer-events: none; }
+.toast { pointer-events: auto; width: 344px; display: flex; gap: 12px; align-items: flex-start;
+  background: rgba(26, 29, 33, .97); border-radius: 4px; padding: 12px 14px 12px 0;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, .55); cursor: pointer;
+  animation: toastin .28s cubic-bezier(.16, .86, .43, .99) both; }
+@keyframes toastin { from { transform: translateY(14px); opacity: 0; } to { transform: none; opacity: 1; } }
+.toast .t-icon { flex: none; width: 28px; height: 28px; margin: 0 12px 0 0; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center; }
+.toast .t-icon svg { width: 14px; height: 14px; }
+.toast .t-title { font-size: 12px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase; color: var(--fg-dim); }
+.toast .t-body { font-size: 14px; line-height: 19px; color: var(--fg-bright); margin-top: 2px; }
+.toast .t-sub { font-size: 12px; line-height: 16px; color: var(--fg-dim); margin-top: 2px; }
+
+#hints { position: absolute; left: 0; right: 0; bottom: 0; height: 40px; z-index: 120;
+  display: flex; align-items: center; justify-content: flex-end; gap: 20px; padding-right: 18px;
+  background: rgba(0, 0, 0, .5); }
+.hint { display: flex; align-items: center; gap: 8px; }
+.hint .glyph { width: 24px; height: 24px; border-radius: 50%; background: #fff; color: #000;
+  font-size: 13px; font-weight: 700; display: flex; align-items: center; justify-content: center; }
+.hint .label { font-size: 13px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase; color: #fff; }
+#mock { position: absolute; left: 16px; top: 10px; z-index: 300; width: auto; max-width: 380px;
+  background: rgba(8, 10, 14, .85); border: 1px dashed rgba(255, 255, 255, .28); border-radius: 14px;
+  padding: 4px 12px; color: #cfd6dd; font-size: 12px; line-height: 17px; cursor: pointer; }
+#mock.open { border-radius: 6px; padding: 10px 12px; cursor: default; }
+#mock .head { font-size: 11px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: #fff; }
+#mock .body { display: none; }
+#mock.open .body { display: block; margin-top: 6px; }
+#mock a { color: #7fb8e0; text-decoration: none; }
+#mock a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <header id="statusbar">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg>
+    <svg width="22" height="18" viewBox="0 0 24 18" fill="#fff"><path d="M12 14.5a2 2 0 1 1 0 3.5 2 2 0 0 1 0-3.5zM4.9 7.6a10.6 10.6 0 0 1 14.2 0l-2 2.2a7.6 7.6 0 0 0-10.2 0zM0.6 2.9a16.8 16.8 0 0 1 22.8 0l-2 2.2a13.8 13.8 0 0 0-18.8 0z"/></svg>
+    <div class="battery"><span>66%</span>
+      <svg width="26" height="14" viewBox="0 0 26 14"><rect x="1" y="1" width="21" height="12" rx="2" fill="none" stroke="#fff" stroke-width="1.6"/><rect x="23.5" y="4" width="2.5" height="6" rx="1" fill="#fff"/><rect x="3" y="3" width="14" height="8" rx="1" fill="#fff"/></svg>
+    </div>
+    <div class="clock">9:41 PM</div>
+  </header>
+
+  <div id="pagehead">
+    <div class="backbtn" data-focusable id="backbtn" title="Back">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 5l-7 7 7 7"/></svg>
+    </div>
+    <div class="ptitle">SaveLocker</div>
+  </div>
+
+  <div id="tabrow">
+    <div class="ptab active" data-tab="games" data-focusable>Games</div>
+    <div class="ptab" data-tab="deck" data-focusable>This Deck</div>
+  </div>
+
+  <div id="body">
+    <!-- GAMES: master list + detail -->
+    <div id="games-tab">
+      <div id="glist-col">
+        <input class="input" id="gsearch" placeholder="Search games" spellcheck="false">
+        <div id="gcount"></div>
+        <div id="glist" style="overflow-y:auto; scrollbar-width:none; flex:1;"></div>
+      </div>
+      <div id="detail-col">
+        <div id="dhead">
+          <div id="dtitle"></div>
+          <div id="dsub"></div>
+          <div id="dactions"></div>
+        </div>
+        <div id="dbody"></div>
+      </div>
+    </div>
+
+    <!-- THIS DECK -->
+    <div id="deck-tab" class="hidden">
+      <div id="deck-inner">
+        <div class="sec">
+          <div class="sec-title">This Deck</div>
+          <div class="tiles">
+            <div class="tile"><div class="t-label">Server</div><div class="t-value">Marwan-PC</div></div>
+            <div class="tile"><div class="t-label">Games</div><div class="t-value">14</div></div>
+            <div class="tile"><div class="t-label">Last sync</div><div class="t-value">2m ago</div></div>
+            <div class="tile"><div class="t-label">Agent</div><div class="t-value">v0.3.0</div></div>
+            <div class="tile"><div class="t-label">Plugin</div><div class="t-value">v0.2.4</div></div>
+          </div>
+        </div>
+        <div class="sec hidden" id="update-sec">
+          <div class="sec-title">Update</div>
+          <div class="row">
+            <div class="row-main">
+              <div class="row-label">v0.3.1 is downloaded and verified</div>
+              <div class="row-desc">Installing restarts the agent — a few seconds, no game is affected.</div>
+            </div>
+            <button class="btn compact" id="install-btn">Install now</button>
+          </div>
+        </div>
+        <div class="sec">
+          <div class="sec-title">Needs attention</div>
+          <div id="attention-rows"></div>
+        </div>
+        <div class="sec">
+          <div class="sec-title">Steam launch options</div>
+          <div class="row" data-focusable id="deck-write-row">
+            <div class="row-main">
+              <div class="row-label">Allow writing to Steam</div>
+              <div class="row-desc">Off: read and show what would change. On: actually set launch options.</div>
+            </div>
+            <div class="toggle" id="deck-write-tg"><i></i></div>
+          </div>
+          <div class="btn-row right"><button class="btn" id="deck-launch-run">Check (no changes)</button></div>
+          <div class="note" id="deck-launch-summary"></div>
+          <div id="deck-launch-rows"></div>
+        </div>
+        <div class="sec">
+          <div class="sec-title">Gaming Mode</div>
+          <div class="row" data-focusable id="deck-gaming-row">
+            <div class="row-main">
+              <div class="row-label">Auto-sync in Gaming Mode</div>
+              <div class="row-desc">Pulls before a game starts and pushes after it closes, for games without a launch-option wrapper.</div>
+            </div>
+            <div class="toggle on" id="deck-gaming-tg"><i></i></div>
+          </div>
+        </div>
+        <div class="sec">
+          <div class="sec-title">Activity</div>
+          <div id="deck-activity"></div>
+        </div>
+        <div class="sec">
+          <div class="sec-title">Diagnostics</div>
+          <div class="row" data-focusable id="deck-doctor-row">
+            <div class="row-main">
+              <div class="row-label">Doctor</div>
+              <div class="row-desc">Makes network calls and takes a few seconds — runs only when you ask.</div>
+            </div>
+            <button class="btn compact" id="deck-doctor">Run doctor</button>
+          </div>
+          <div id="deck-doctor-out"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="menu-root"></div>
+  <div id="modal-root"></div>
+  <div id="toast-root"></div>
+
+  <footer id="hints">
+    <div class="hint dynamic"><div class="glyph">A</div><div class="label">Select</div></div>
+    <div class="hint"><div class="glyph">B</div><div class="label">Back</div></div>
+  </footer>
+
+  <div id="mock">
+    <div class="head" id="mock-toggle">Option B — Game-first</div>
+    <div class="body">
+      <div class="note">Master list + per-game detail; no dialogs for per-game work.
+        <a href="settings-option-a-paged.html">Option A</a> ·
+        <a href="settings-option-c-cockpit.html">Option C</a></div>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+const $ = (sel, root) => (root || document).querySelector(sel);
+const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
+const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+const GAMES = [
+  { id: "ds",  name: "Death Stranding (Director's Cut)", alias: null, cloud: true,  pull: true,  sopen: true,  policy: "Manual",            applied: true,  conflict: true,
+    folder: "~/.steam/steam/steamapps/compatdata/1190460/pfx/drive_c/users/steamuser/Documents/Death Stranding",
+    now: "savelocker run -- %command%" },
+  { id: "er",  name: "Elden Ring", alias: null, cloud: false, pull: true,  sopen: true,  policy: "NewestWins",        applied: true,  conflict: false,
+    folder: "~/.steam/steam/steamapps/compatdata/1245620/pfx/drive_c/users/steamuser/AppData/Roaming/EldenRing",
+    now: "" },
+  { id: "h3",  name: "Halo 3", alias: null, cloud: false, pull: true,  sopen: false, policy: "Manual",            applied: true,  conflict: false,
+    folder: "~/.steam/steam/steamapps/compatdata/1064272/pfx/drive_c/users/steamuser/Documents/My Games/Halo 3",
+    now: "savelocker run -- %command%" },
+  { id: "bal", name: "Balatro", alias: null, cloud: true,  pull: false, sopen: true,  policy: "Manual",            applied: true,  conflict: false,
+    folder: "~/.steam/steam/steamapps/compatdata/2379780/pfx/drive_c/users/steamuser/AppData/Roaming/Balatro",
+    now: "savelocker run -- %command%" },
+  { id: "fh",  name: "Forza Horizon", alias: "Forza Horizon", cloud: false, pull: true, sopen: true, policy: "PreferMachine", applied: true, conflict: false,
+    folder: "~/.steam/steam/steamapps/compatdata/3091591690/pfx/drive_c/users/steamuser/Documents/Xenia",
+    now: "savelocker run -- %command%" },
+];
+const POLICY_OPTIONS = [
+  { data: "Manual", label: "Ask me every time" },
+  { data: "NewestWins", label: "Newest save always wins" },
+  { data: "PreferMachine", label: "Prefer this device" },
+];
+const policyLabel = (p) => (POLICY_OPTIONS.find((o) => o.data === p) || {}).label || "Ask me every time";
+
+let activity = [
+  { at: "2m ago",  msg: "pushed new version for Balatro" },
+  { at: "26m ago", msg: "restored latest save for Death Stranding (Director's Cut)" },
+  { at: "1h ago",  msg: "pull refused for Elden Ring — game is running" },
+  { at: "3h ago",  msg: "pushed new version for Halo 3" },
+  { at: "5h ago",  msg: "no local changes since last sync (all games)" },
+];
+let launchChecked = [
+  { name: "Death Stranding (Director's Cut)", state: "ok",    now: "savelocker run -- %command%" },
+  { name: "Elden Ring",                       state: "would", now: "" },
+  { name: "Halo 3",                           state: "ok",    now: "savelocker run -- %command%" },
+  { name: "Balatro",                          state: "ok",    now: "savelocker run -- %command%" },
+  { name: "Forza Horizon",                    state: "ok",    now: "savelocker run -- %command%" },
+];
+let writeEnabled = false;
+let staged = true;
+let selectedId = "ds";
+let searchQuery = "";
+
+/* Toasts (same language as the QAM mockup). */
+const TOAST_ICONS = {
+  syncing: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/></svg>',
+  success: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8 12.5l3 3 5-6"/></svg>',
+  blocked: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="5" y="10.5" width="14" height="9" rx="2"/><path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5"/></svg>',
+  error:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M9 9l6 6M15 9l-6 6"/></svg>',
+  info:    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>',
+  conflict:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4v7a4 4 0 0 0 4 4h8"/><path d="M14 12l4 3-4 3"/><path d="M18 4v4a4 4 0 0 1-4 4"/></svg>',
+};
+function toast(kind, body, sub) {
+  const el = document.createElement("div");
+  el.className = "toast";
+  el.innerHTML =
+    `<div class="t-icon" style="background: var(--k-${kind}-bg); color: var(--k-${kind}-fg);">${TOAST_ICONS[kind] || TOAST_ICONS.info}</div>` +
+    `<div style="flex:1; min-width:0;"><div class="t-title">SaveLocker</div>` +
+    `<div class="t-body">${body}</div>` + (sub ? `<div class="t-sub">${sub}</div>` : "") + `</div>`;
+  el.addEventListener("click", () => el.remove());
+  $("#toast-root").appendChild(el);
+  setTimeout(() => { el.style.transition = "opacity .3s"; el.style.opacity = "0"; setTimeout(() => el.remove(), 320); }, 4200);
+}
+
+/* Focus + keyboard. */
+function setFocus(el) {
+  if (!el) return;
+  if (!el.hasAttribute("tabindex") && el.tagName !== "BUTTON" && el.tagName !== "INPUT") el.setAttribute("tabindex", "-1");
+  $$(".gpfocus", document).forEach((n) => n.classList.remove("gpfocus"));
+  el.focus(); el.classList.add("gpfocus");
+}
+function focusables(scope) {
+  return $$("[data-focusable], button, .ptab, .gitem, .menu-item", scope || document)
+    .filter((el) => el.offsetParent !== null && !el.hasAttribute("disabled"));
+}
+function currentScope() {
+  if ($("#modal-root").classList.contains("open")) return $("#modal-root");
+  if ($("#menu-root").classList.contains("open")) return $("#menu-root");
+  return activeTab === "games" ? $("#games-tab") : $("#deck-tab");
+}
+function move(dir) {
+  const list = focusables(currentScope());
+  if (!list.length) return;
+  const i = list.indexOf(document.activeElement);
+  setFocus(list[i < 0 ? 0 : (i + dir + list.length) % list.length]);
+}
+let activeTab = "games";
+document.addEventListener("keydown", (e) => {
+  if (e.key === "ArrowDown" || e.key === "ArrowRight" || (e.key === "Tab" && !e.shiftKey)) { e.preventDefault(); move(1); return; }
+  if (e.key === "ArrowUp" || e.key === "ArrowLeft" || (e.key === "Tab" && e.shiftKey)) { e.preventDefault(); move(-1); return; }
+  if (e.key === "Enter" || e.key === " ") {
+    const a = document.activeElement;
+    if (a && a.tagName !== "INPUT" && (a.tagName === "BUTTON" || a.dataset.focusable !== undefined)) { e.preventDefault(); a.click(); }
+    return;
+  }
+  if (e.key === "Escape" || e.key === "b" || e.key === "Backspace") { e.preventDefault(); back(); }
+});
+function back() {
+  if ($("#modal-root").classList.contains("open")) { closeModal(); return; }
+  if ($("#menu-root").classList.contains("open")) { closeMenu(); return; }
+  toast("info", "B would return to the Quick Access panel");
+}
+document.addEventListener("click", (e) => {
+  const el = e.target.closest("[data-focusable], button, .ptab, .gitem");
+  if (el && !el.hasAttribute("disabled")) setFocus(el);
+});
+
+/* Context menu + modal. */
+function openMenu(anchorEl, items, current, onPick) {
+  const root = $("#menu-root");
+  root.classList.add("open");
+  const rect = anchorEl.getBoundingClientRect();
+  const stageRect = $("#stage").getBoundingClientRect();
+  const scale = stageRect.width / 1280;
+  const pop = document.createElement("div");
+  pop.className = "menu-pop";
+  pop.style.left = `${(rect.left - stageRect.left) / scale}px`;
+  pop.style.top = `${(rect.bottom - stageRect.top) / scale + 4}px`;
+  pop.innerHTML = items.map((it) => `<div class="menu-item">${esc(it.label)}</div>`).join("");
+  root.innerHTML = ""; root.appendChild(pop);
+  const nodes = Array.from(pop.querySelectorAll(".menu-item"));
+  setFocus(nodes.find((n) => n.textContent === current) || nodes[0]);
+  root.onclick = (e) => {
+    const item = e.target.closest(".menu-item");
+    if (!item) return;
+    onPick(items.find((i) => i.label === item.textContent)); closeMenu();
+  };
+  root.onmousedown = (e) => { if (e.target === root) closeMenu(); };
+}
+function closeMenu() { $("#menu-root").classList.remove("open"); $("#menu-root").innerHTML = ""; }
+function openModal(html, opts) {
+  const root = $("#modal-root");
+  root.classList.add("open");
+  root.innerHTML = `<div class="modal-scrim"><div class="modal">${html}</div></div>`;
+  const scrimClose = !opts || opts.scrimClose !== false;
+  root.onmousedown = (e) => { if (scrimClose && e.target.classList.contains("modal-scrim")) closeModal(); };
+  root._onClose = (opts && opts.onClose) || null;
+  setFocus(focusables(root)[0]);
+}
+function closeModal() {
+  const root = $("#modal-root");
+  const cb = root._onClose;
+  root.classList.remove("open"); root.innerHTML = ""; root._onClose = null;
+  if (cb) cb();
+}
+
+/* Tabs. */
+$$(".ptab").forEach((t) => t.addEventListener("click", () => {
+  activeTab = t.dataset.tab;
+  $$(".ptab").forEach((n) => n.classList.toggle("active", n === t));
+  $("#games-tab").classList.toggle("hidden", activeTab !== "games");
+  $("#deck-tab").classList.toggle("hidden", activeTab !== "deck");
+}));
+$("#backbtn").addEventListener("click", back);
+
+/* Games list. */
+function gameStatus(g) {
+  return g.conflict ? { chip: "conflict", label: "Conflict", dot: "conflict" } : { chip: "ok", label: "In sync", dot: "ok" };
+}
+function renderList() {
+  const q = searchQuery.trim().toLowerCase();
+  const list = GAMES.filter((g) => q === "" || g.name.toLowerCase().includes(q) || (g.alias || "").toLowerCase().includes(q));
+  $("#gcount").textContent = q === "" ? `${GAMES.length} tracked` : `${list.length} of ${GAMES.length}`;
+  $("#glist").innerHTML = list.length === 0
+    ? `<div class="empty" style="padding:0 20px;">No games match "${esc(searchQuery.trim())}".</div>`
+    : list.map((g) => `
+      <div class="gitem ${g.id === selectedId ? "selected" : ""}" data-focusable data-game="${g.id}">
+        <span class="dot ${gameStatus(g).dot}"></span>
+        <div class="g-main">
+          <div class="g-name">${esc(g.name)}</div>
+          <div class="g-sub">${g.alias ? "alias: " + esc(g.alias) + " · " : ""}${g.cloud ? "Steam Cloud" : "no Steam Cloud"}</div>
+        </div>
+        <span class="chip ${gameStatus(g).chip}">${gameStatus(g).label}</span>
+      </div>`).join("");
+  $$("#glist .gitem").forEach((it) => it.addEventListener("click", () => selectGame(it.dataset.game)));
+}
+$("#gsearch").addEventListener("input", (e) => { searchQuery = e.target.value; renderList(); });
+
+function selectGame(id) {
+  selectedId = id;
+  renderList();
+  renderDetail();
+  $("#detail-col").scrollTop = 0;
+}
+
+/* Detail pane — the heart of this option. */
+function renderDetail() {
+  const g = GAMES.find((x) => x.id === selectedId);
+  const st = gameStatus(g);
+  $("#dtitle").innerHTML = `${esc(g.name)} <span class="chip ${st.chip}" id="d-chip">${st.label}</span>`;
+  $("#dsub").textContent = `${g.alias ? "alias: " + g.alias + " · " : ""}${g.cloud ? "Steam Cloud saves" : "no Steam Cloud saves"} · ${g.now ? "launch options set" : "launch options not set"}`;
+  $("#dactions").innerHTML = `
+    <button class="btn compact" id="d-sync">Sync this game</button>
+    <button class="btn compact" id="d-check">Check sync status</button>
+    ${g.conflict ? '<button class="btn compact" id="d-resolve">Resolve conflict</button>' : ""}`;
+  $("#dbody").innerHTML = `
+    <div class="sec">
+      <div class="sec-title">This game</div>
+      <div class="row">
+        <div class="row-main">
+          <div class="row-label">Save folder</div>
+          <div class="row-desc" style="word-break:break-all;">${esc(g.folder)}</div>
+        </div>
+      </div>
+      <div class="row">
+        <div class="row-main">
+          <div class="row-label">Steam launch options</div>
+          <div class="row-desc">${g.now ? "Set by SaveLocker — your own options are preserved." : "SaveLocker has not set this game's options yet."}</div>
+        </div>
+        <div class="row-value">${g.now ? "set" : "needs setting"}</div>
+      </div>
+    </div>
+
+    <div class="sec">
+      <div class="sec-title">Launch behavior</div>
+      <div class="row" data-focusable id="d-pull">
+        <div class="row-main">
+          <div class="row-label">Pull before launch</div>
+          <div class="row-desc">${g.cloud ? "Off by default: Steam Cloud already handles this title." : "On: the save is current before the game starts."}</div>
+        </div>
+        <div class="toggle ${g.pull ? "on" : ""}" id="d-pull-tg"><i></i></div>
+      </div>
+      <div class="row ${g.pull ? "" : "hidden"}" data-focusable id="d-sopen">
+        <div class="row-main">
+          <div class="row-label">Sync on page open</div>
+          <div class="row-desc">Moves the pull to the library page, so Play starts instantly.</div>
+        </div>
+        <div class="toggle ${g.sopen ? "on" : ""}" id="d-sopen-tg"><i></i></div>
+      </div>
+    </div>
+
+    <div class="sec">
+      <div class="sec-title">Name match</div>
+      <div class="row" data-focusable id="d-alias">
+        <div class="row-main">
+          <div class="row-label">Alias</div>
+          <div class="row-desc">Used when matching a launch to this game.</div>
+        </div>
+        <div class="row-value" id="d-alias-val">${esc(g.alias || g.name)}</div>
+        <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+      </div>
+      <div class="hidden" id="d-alias-edit">
+        <input class="input" id="d-alias-input" value="${esc(g.alias || g.name)}" spellcheck="false">
+        <div class="btn-row right">
+          <button class="btn" id="d-alias-cancel">Cancel</button>
+          <button class="btn" id="d-alias-save">Save</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="sec">
+      <div class="sec-title">Save conflicts</div>
+      <div class="row" data-focusable id="d-policy">
+        <div class="row-main">
+          <div class="row-label">If a save conflict happens</div>
+          ${g.policy === "PreferMachine" ? '<div class="row-desc">Currently prefers a different device — set from the dashboard.</div>' : ""}
+        </div>
+        <div class="row-value" id="d-policy-val">${esc(policyLabel(g.policy))}</div>
+        <svg class="chev down" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+      </div>
+      ${g.conflict ? `
+      <div class="row">
+        <span class="dot conflict"></span>
+        <div class="row-main">
+          <div class="row-label">A save conflict is open</div>
+          <div class="row-desc">Pick which save to keep — this device's or the cloud's.</div>
+        </div>
+      </div>` : ""}
+    </div>
+
+    <div class="sec">
+      <div class="sec-title">Status</div>
+      <div class="row">
+        <div class="row-main" id="d-status-text">
+          <div class="row-label">Sync status</div>
+          <div class="row-desc">Checked on demand — it hashes the whole save folder.</div>
+        </div>
+      </div>
+    </div>`;
+
+  $("#d-pull").addEventListener("click", () => {
+    g.pull = !g.pull;
+    $("#d-pull-tg").classList.toggle("on", g.pull);
+    $("#d-sopen").classList.toggle("hidden", !g.pull);
+    toast(g.pull ? "success" : "info", g.pull ? `Pull before launch on for ${g.name}` : `Pull before launch off for ${g.name}`,
+      g.pull && g.cloud ? "You turned this on for a Steam Cloud title — it may fight Cloud sync" : undefined);
+  });
+  $("#d-sopen").addEventListener("click", () => {
+    g.sopen = !g.sopen;
+    $("#d-sopen-tg").classList.toggle("on", g.sopen);
+  });
+  $("#d-alias").addEventListener("click", () => {
+    $("#d-alias").classList.add("hidden");
+    $("#d-alias-edit").classList.remove("hidden");
+    setFocus($("#d-alias-input"));
+  });
+  $("#d-alias-cancel").addEventListener("click", () => {
+    $("#d-alias-edit").classList.add("hidden");
+    $("#d-alias").classList.remove("hidden");
+  });
+  $("#d-alias-save").addEventListener("click", () => {
+    const v = $("#d-alias-input").value.trim();
+    g.alias = v === "" || v === g.name ? null : v;
+    renderDetail();
+    renderList();
+    toast("success", "Alias saved", g.alias ? `Games launching as "${g.alias}" now match` : "Back to the game's own name");
+  });
+  $("#d-policy").addEventListener("click", () => {
+    openMenu($("#d-policy"), POLICY_OPTIONS, policyLabel(g.policy), (picked) => {
+      g.policy = picked.data;
+      renderDetail();
+    });
+  });
+  $("#d-sync").addEventListener("click", () => {
+    const b = $("#d-sync");
+    b.disabled = true; b.textContent = "Syncing…";
+    setTimeout(() => {
+      activity.unshift({ at: "just now", msg: `pushed new version for ${g.name}` });
+      setChip(g, g.conflict ? "conflict" : "ok");
+      toast("success", `${g.name} synced`);
+      renderDetail();
+    }, 1500);
+  });
+  $("#d-check").addEventListener("click", () => {
+    const b = $("#d-check");
+    b.disabled = true; b.textContent = "Checking…";
+    $("#d-status-text .row-desc").textContent = "Hashing the save folder…";
+    setTimeout(() => {
+      b.disabled = false; b.textContent = "Check again";
+      $("#d-status-text .row-desc").textContent = g.conflict
+        ? "Out of sync — a conflict is open."
+        : "In sync with the cloud — checked just now.";
+    }, 1400);
+  });
+  const resolve = $("#d-resolve");
+  if (resolve) resolve.addEventListener("click", () => conflictModal(g));
+}
+function setChip(g, kind) { /* status is derived in gameStatus() from g.conflict; nothing to store */ }
+
+/* Conflict resolve (shared shape). */
+function conflictModal(g) {
+  openModal(`
+    <div class="modal-title">${esc(g.name)} — your save and the cloud have both changed</div>
+    <div class="modal-sub">Pick which save to keep — the other one is never deleted right now, just set aside.</div>
+    <div style="display:flex; gap:10px;">
+      <div class="row" data-focusable id="c-local" style="flex:1; flex-direction:column; align-items:flex-start; background:rgba(255,255,255,.05); border:1px solid rgba(255,255,255,.12); border-radius:8px; padding:14px;">
+        <div class="row-label" style="font-weight:700; font-size:13px;">This Device</div>
+        <div style="font-size:15px; margin:8px 0 3px;">12 minutes ago</div>
+        <div class="row-desc">6 files · 1.42 MB · this Deck right now</div>
+        <button class="btn compact" style="margin-top:12px; width:100%;">Keep This Device</button>
+      </div>
+      <div class="row" data-focusable id="c-cloud" style="flex:1; flex-direction:column; align-items:flex-start; background:rgba(255,255,255,.05); border:1px solid rgba(255,255,255,.12); border-radius:8px; padding:14px;">
+        <div class="row-label" style="font-weight:700; font-size:13px;">The Cloud <span class="chip ok" style="font-size:9.5px;">Newer</span></div>
+        <div style="font-size:15px; margin:8px 0 3px;">8 minutes ago</div>
+        <div class="row-desc">6 files · 1.44 MB · from "Deck-B"</div>
+        <button class="btn compact" style="margin-top:12px; width:100%;">Keep The Cloud</button>
+      </div>
+    </div>`, { onClose: () => { renderList(); renderDetail(); renderAttention(); } });
+  const done = (which) => {
+    g.conflict = false;
+    closeModal();
+    toast("success", `${g.name} — conflict resolved`, `Kept ${which}`);
+  };
+  $("#c-local").addEventListener("click", () => done("This Device"));
+  $("#c-cloud").addEventListener("click", () => done("The Cloud"));
+}
+
+/* This Deck tab. */
+function renderAttention() {
+  const rows = [];
+  const conflicted = GAMES.filter((g) => g.conflict);
+  for (const g of conflicted) {
+    rows.push(`<div class="row" data-focusable data-att="conflict:${g.id}">
+      <span class="dot conflict"></span>
+      <div class="row-main">
+        <div class="row-label">Save conflict — ${esc(g.name)}</div>
+        <div class="row-desc">This Deck and the cloud both changed since the last sync.</div>
+      </div>
+      <button class="btn compact">Resolve</button>
+    </div>`);
+  }
+  if (!window.__leaseDismissed) {
+    rows.push(`<div class="row">
+      <span class="dot warning"></span>
+      <div class="row-main">
+        <div class="row-label">Checked out elsewhere — Elden Ring</div>
+        <div class="row-desc">Open on Deck-B. Playing here may cause a conflict.</div>
+      </div>
+      <button class="btn compact" id="deck-dismiss">Dismiss</button>
+    </div>`);
+  }
+  $("#attention-rows").innerHTML = rows.length ? rows.join("") : `<div class="empty">All clear.</div>`;
+  $$("#attention-rows .row[data-att]").forEach((row) => row.addEventListener("click", () => {
+    const id = row.dataset.att.split(":")[1];
+    conflictModal(GAMES.find((g) => g.id === id));
+  }));
+  const dis = $("#deck-dismiss");
+  if (dis) dis.addEventListener("click", (e) => {
+    e.stopPropagation();
+    window.__leaseDismissed = true;
+    renderAttention();
+    toast("info", "Notice dismissed", "It returns if the lease is still held");
+  });
+}
+function renderDeckLaunch() {
+  $("#deck-write-tg").classList.toggle("on", writeEnabled);
+  $("#deck-launch-run").textContent = writeEnabled ? "Apply now" : "Check (no changes)";
+  const n = (s) => launchChecked.filter((o) => o.state === s).length;
+  $("#deck-launch-summary").textContent = `${launchChecked.length} games · ${n("ok")} already set · ${n("would")} would change · ${n("written")} set`;
+  $("#deck-launch-rows").innerHTML = launchChecked.map((o) => `
+    <div class="row">
+      <div class="row-main">
+        <div class="row-label">${esc(o.name)} <span class="chip ${o.state === "ok" ? "info" : o.state === "would" ? "blocked" : "ok"}">${o.state === "ok" ? "ok" : o.state === "would" ? "would change" : "set"}</span></div>
+        ${o.state === "would" ? `<div class="row-desc">now: ${o.now === "" ? "(empty)" : esc(o.now)}<br>target: savelocker run -- %command%</div>` : ""}
+      </div>
+    </div>`).join("");
+}
+$("#deck-write-row").addEventListener("click", () => {
+  writeEnabled = !writeEnabled;
+  renderDeckLaunch();
+  toast(writeEnabled ? "blocked" : "info", writeEnabled ? "Writing to Steam is ON" : "Writing to Steam is OFF",
+    writeEnabled ? "The next run actually sets launch options" : undefined);
+});
+$("#deck-launch-run").addEventListener("click", () => {
+  const b = $("#deck-launch-run");
+  b.disabled = true; b.textContent = writeEnabled ? "Applying…" : "Checking…";
+  setTimeout(() => {
+    b.disabled = false;
+    if (writeEnabled) {
+      const changed = launchChecked.filter((o) => o.state === "would");
+      changed.forEach((o) => { o.state = "written"; o.now = "savelocker run -- %command%"; });
+      renderDeckLaunch();
+      toast("success", `${changed.length} launch option${changed.length === 1 ? "" : "s"} set`);
+    } else {
+      renderDeckLaunch();
+      toast("info", "Check finished", "Nothing was written to Steam");
+    }
+  }, 1600);
+});
+$("#deck-gaming-row").addEventListener("click", () => {
+  $("#deck-gaming-tg").classList.toggle("on");
+  toast($("#deck-gaming-tg").classList.contains("on") ? "success" : "info",
+    $("#deck-gaming-tg").classList.contains("on") ? "Auto-sync in Gaming Mode on" : "Auto-sync in Gaming Mode off");
+});
+function renderDeckActivity() {
+  $("#deck-activity").innerHTML = activity.map((a) => `
+    <div class="row">
+      <div class="row-main">
+        <div class="row-label" style="font-size:15px;">${esc(a.msg)}</div>
+        <div class="row-desc">${esc(a.at)}</div>
+      </div>
+    </div>`).join("");
+}
+$("#install-btn").addEventListener("click", () => {
+  const b = $("#install-btn");
+  b.disabled = true; b.textContent = "Installing…";
+  setTimeout(() => {
+    staged = false;
+    $("#update-sec").classList.add("hidden");
+    toast("success", "Installed. Now running v0.3.1.", "The agent restarted");
+  }, 2200);
+});
+$("#deck-doctor").addEventListener("click", () => {
+  const b = $("#deck-doctor");
+  b.disabled = true; b.textContent = "Running…";
+  $("#deck-doctor-out").innerHTML = "";
+  setTimeout(() => {
+    b.disabled = false; b.textContent = "Run again";
+    $("#deck-doctor-out").innerHTML = `
+      <div class="note">Exited 1 — see below.</div>
+      <div class="pre">savelocker doctor
+  config:      OK
+  api-token:   OK (~/.local/share/SaveLocker/api-token)
+  service:     OK (savelocker.service active)
+  port 5178:   OK
+  launch-opts: 4 of 5 games set, 1 would change (Elden Ring)
+  hint:        run "savelocker launch-options" for every game</div>`;
+  }, 1800);
+});
+
+/* Init. */
+renderList();
+renderDetail();
+renderAttention();
+renderDeckLaunch();
+renderDeckActivity();
+
+const initial = location.hash.replace("#", "");
+if (initial === "deck") { $(".ptab[data-tab='deck']").click(); }
+else if (initial && GAMES.some((g) => g.id === initial)) { selectGame(initial); }
+setTimeout(() => setFocus(focusables($("#games-tab"))[0]), 150);
+
+function fit() {
+  const s = Math.min(window.innerWidth / 1300, window.innerHeight / 830, 1);
+  $("#stage").style.transform = `scale(${s})`;
+}
+window.addEventListener("resize", fit);
+fit();
+$("#mock-toggle").addEventListener("click", () => $("#mock").classList.toggle("open"));
+</script>
+</body>
+</html>

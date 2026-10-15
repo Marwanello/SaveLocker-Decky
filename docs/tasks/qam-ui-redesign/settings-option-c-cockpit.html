@@ -1,0 +1,813 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SaveLocker settings — Option C: One-page cockpit</title>
+<!--
+  SETTINGS REDESIGN — OPTION C of 3: "One-page cockpit".
+
+  No tabs, no page list, no dialogs: one continuous page with a sticky chip bar that jumps to
+  sections, and per-game settings that expand inline where the game already is. The bet is that
+  this is the most seamless of the three — every answer and every control is one press from the
+  surface you are already on — at the cost of a longer scroll that the chip bar (with scrollspy)
+  exists to manage.
+
+  Chrome values from Valve's gamepad UI stylesheet (same extraction as the other mockups):
+    - page background: radial-gradient(155.42% 100% at 0% 0%, #060a0e 0%, #0e141b 100%)
+    - chip bar: the GamepadTabbedPage tab treatment — uppercase 12px/22 bold, active
+      rgba(189,197,206,.48), focus #fff bg + #23262e; pinned with a blur wash so rows can scroll
+      beneath it (the client's own TabHeaderRowWrapper uses backdrop-filter blur(100px))
+    - everything else: the QAM mockup's extracted tokens.
+-->
+<style>
+@font-face { font-family: "Motiva Sans"; font-weight: 400; font-style: normal;
+  src: url("https://community.cloudflare.steamstatic.com/public/shared/fonts/MotivaSans-Regular.ttf") format("truetype"); }
+@font-face { font-family: "Motiva Sans"; font-weight: 500; font-style: normal;
+  src: url("https://community.cloudflare.steamstatic.com/public/shared/fonts/MotivaSans-Medium.ttf") format("truetype"); }
+@font-face { font-family: "Motiva Sans"; font-weight: 700; font-style: normal;
+  src: url("https://community.cloudflare.steamstatic.com/public/shared/fonts/MotivaSans-Bold.ttf") format("truetype"); }
+
+:root {
+  --page-bg-a: #060a0e;
+  --page-bg-b: #0e141b;
+  --qam-border: #23262e;
+  --field-focus-bg: #3d4450;
+  --fg: #dcdedf;
+  --fg-bright: #fff;
+  --fg-dim: rgba(255, 255, 255, .6);
+  --fg-faint: rgba(255, 255, 255, .4);
+  --icon: #8b929a;
+  --icon-disabled: #67707b;
+  --sep: rgba(255, 255, 255, .1);
+  --btn: rgba(255, 255, 255, .15);
+  --btn-hover: rgba(255, 255, 255, .2);
+  --btn-focus-fg: #23262e;
+  --accent: #1a9fff;
+  --danger: #de3618;
+  --k-syncing-bg: #2a3a45;  --k-syncing-fg: #7fb8e0;
+  --k-success-bg: #1e3a2a;  --k-success-fg: #6fce9a;
+  --k-blocked-bg: #3a2f16;  --k-blocked-fg: #e0b355;
+  --k-error-bg:   #3a1e1e;  --k-error-fg:   #e07272;
+  --k-warning-bg: #2f2440;  --k-warning-fg: #b596e6;
+  --k-info-bg:    #26292c;  --k-info-fg:    #9a9a96;
+  --k-conflict-bg:#3a1a2e;  --k-conflict-fg:#e0578f;
+}
+
+* { box-sizing: border-box; }
+.hidden { display: none !important; }
+html, body { margin: 0; padding: 0; height: 100%; background: #05070a;
+  font-family: "Motiva Sans", Helvetica, Arial, sans-serif; -webkit-font-smoothing: antialiased; }
+body { display: flex; align-items: center; justify-content: center; overflow: hidden; }
+
+#stage { position: relative; width: 1280px; height: 800px; flex: none; overflow: hidden;
+  transform-origin: center center; box-shadow: 0 30px 120px rgba(0, 0, 0, .8), 0 0 0 1px rgba(255, 255, 255, .06);
+  background: radial-gradient(155.42% 100% at 0% 0%, var(--page-bg-a) 0%, var(--page-bg-b) 100%);
+  display: flex; flex-direction: column; }
+
+#statusbar { position: absolute; top: 0; left: 0; right: 0; height: 48px; z-index: 60;
+  display: flex; align-items: center; justify-content: flex-end; gap: 18px; padding-right: 24px;
+  color: #fff; font-size: 16px; pointer-events: none; }
+#statusbar svg { display: block; }
+#statusbar .battery { display: flex; align-items: center; gap: 6px; font-weight: 500; }
+#statusbar .clock { font-weight: 500; letter-spacing: .3px; min-width: 74px; text-align: right; }
+
+#pagehead { flex: none; display: flex; align-items: center; gap: 12px; padding: 54px 2.8vw 12px; }
+.backbtn { width: 34px; height: 34px; display: flex; align-items: center; justify-content: center;
+  border-radius: 50%; color: #fff; cursor: pointer; outline: none; flex: none; }
+.backbtn:hover { background: rgba(255, 255, 255, .1); }
+.backbtn.gpfocus, .backbtn:focus { background: #fff; color: var(--btn-focus-fg); }
+.backbtn svg { width: 24px; height: 24px; }
+.ptitle { flex: 1; font-size: 22px; line-height: 28px; font-weight: 700; color: #fff; }
+.btn.compact { width: auto; padding: 6px 14px; font-size: 14px; line-height: 18px; flex: none; }
+
+/* Sticky chip bar (pinned with a blur wash, like the client's own pinned tab header). */
+#chipbar { flex: none; position: sticky; top: 0; z-index: 20; display: flex; justify-content: center; gap: 6px;
+  padding: 8px 2.8vw 12px; background: rgba(14, 20, 27, .82); backdrop-filter: blur(10px); }
+.jchip { font-size: 12px; line-height: 22px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase;
+  padding: 2px 14px; border-radius: 11px; color: rgba(255, 255, 255, .75); cursor: pointer; outline: none;
+  transition: background-color 150ms ease-in, color 150ms ease-in; }
+.jchip:hover { background: rgba(255, 255, 255, .15); color: #fff; }
+.jchip.active { background: rgba(189, 197, 206, .48); color: #fff; }
+.jchip.gpfocus, .jchip:focus { background: #fff; color: var(--btn-focus-fg); box-shadow: 0 3px 6px rgba(0, 0, 0, .32); }
+
+#scroll { flex: 1; min-height: 0; overflow-y: auto; scrollbar-width: none; padding: 6px 2.8vw 96px; position: relative; }
+#scroll::-webkit-scrollbar { display: none; }
+#inner { max-width: 880px; }
+
+.sec { margin: 0 0 32px; }
+.sec-title { font-size: 16px; line-height: 20px; font-weight: 600; letter-spacing: .5px;
+  text-transform: uppercase; color: rgba(255, 255, 255, .7); padding: 0 0 8px; }
+.row { position: relative; display: flex; align-items: center; gap: 12px; padding: 12px 0; border-radius: 2px;
+  color: var(--fg); outline: none; }
+.row + .row::before { content: ""; position: absolute; top: 0; left: 0; right: 0; height: 1px; background: var(--sep); }
+.row[data-focusable] { cursor: pointer; }
+.row[data-focusable]:hover { background: rgba(255, 255, 255, .04); }
+.row[data-focusable].gpfocus, .row[data-focusable]:focus { background: var(--field-focus-bg); }
+.row[data-focusable].gpfocus .row-label, .row[data-focusable]:focus .row-label { color: var(--fg-bright); }
+.row-main { flex: 1; min-width: 0; }
+.row-label { font-size: 16px; line-height: 20px; }
+.row-desc { font-size: 12px; line-height: 16px; color: var(--fg-dim); margin-top: 2px; }
+.row-value { font-size: 16px; color: var(--fg-dim); white-space: nowrap; max-width: 55%; overflow: hidden; text-overflow: ellipsis; }
+.chev { flex: none; width: 16px; height: 16px; color: var(--icon); transition: transform .2s; }
+.chev.down { transform: rotate(90deg); }
+.dot { flex: none; width: 9px; height: 9px; border-radius: 50%; }
+.dot.ok { background: var(--k-success-fg); }
+.dot.conflict { background: var(--k-conflict-fg); }
+.dot.warning { background: var(--k-warning-fg); }
+.dot.blocked { background: var(--k-blocked-fg); }
+.dot.info { background: var(--k-info-fg); }
+
+.btn { display: block; width: 100%; padding: 10px 24px; margin: 0; font-family: inherit;
+  font-size: 16px; line-height: 20px; color: var(--fg); background: var(--btn); border: 0; border-radius: 2px;
+  text-align: center; cursor: pointer; outline: none; transition: background-color .15s ease-in, color .15s ease-in; }
+.btn:hover { background: var(--btn-hover); }
+.btn.gpfocus, .btn:focus { background: #fff; color: var(--btn-focus-fg); }
+.btn.primary.gpfocus, .btn.primary:focus { background: var(--accent); color: #fff; }
+.btn[disabled] { opacity: .4; background: #131418; color: #fff; pointer-events: none; }
+.btn-row.right { display: flex; justify-content: flex-end; gap: 10px; margin-top: 10px; }
+.btn-row.right .btn { width: auto; min-width: 150px; flex: none; }
+
+.toggle { flex: none; width: 38px; height: 22px; border-radius: 16px; position: relative;
+  background: hsla(0, 0%, 100%, .15); transition: background-color .2s ease-out; }
+.toggle > i { position: absolute; left: 0; top: 0; bottom: 0; width: 22px; border-radius: 50%;
+  background: #fff; box-shadow: 0 0 5px rgba(0, 0, 0, .35); transition: transform .2s cubic-bezier(.1, .12, .53, 1.72); }
+.toggle.on { background: var(--accent); }
+.toggle.on > i { transform: translateX(16px); }
+.row[data-focusable].gpfocus .toggle, .row[data-focusable]:focus .toggle { box-shadow: 0 0 0 4px rgba(255, 255, 255, .3); }
+.row[data-focusable].gpfocus .toggle:not(.on), .row[data-focusable]:focus .toggle:not(.on) { background: var(--qam-border); }
+.row[data-focusable].gpfocus .toggle:not(.on) > i, .row[data-focusable]:focus .toggle:not(.on) > i {
+  border: 2px solid var(--icon-disabled); margin: -2px; }
+
+.input { display: block; width: 100%; padding: 10px 16px; font-family: inherit; font-size: 16px;
+  line-height: 20px; color: #fff; background: hsla(0, 0%, 100%, .1); border: 0; border-radius: 0; outline: none; }
+.input::placeholder { font-style: italic; color: var(--icon-disabled); }
+.input:focus { background: #fff; color: #000; }
+
+.chip { flex: none; display: inline-flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 700;
+  letter-spacing: .5px; text-transform: uppercase; padding: 2px 8px; border-radius: 10px; white-space: nowrap; }
+.chip.ok { color: var(--k-success-fg); background: var(--k-success-bg); }
+.chip.conflict { color: var(--k-conflict-fg); background: var(--k-conflict-bg); }
+.chip.blocked { color: var(--k-blocked-fg); background: var(--k-blocked-bg); }
+.chip.info { color: var(--k-info-fg); background: var(--k-info-bg); }
+.note { font-size: 12px; line-height: 16px; color: var(--fg-dim); padding: 4px 0; }
+.empty { font-size: 14px; color: var(--fg-dim); padding: 10px 0; }
+
+.tiles { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
+.tile { background: rgba(255, 255, 255, .05); border-radius: 2px; padding: 12px 14px; }
+.tile .t-label { font-size: 11px; letter-spacing: .5px; text-transform: uppercase; color: var(--fg-faint); }
+.tile .t-value { font-size: 18px; color: var(--fg-bright); margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+/* Inline expanded game detail — the accordion body. */
+.grow-wrap { position: relative; }
+.gdetail { margin: 4px 0 10px 21px; padding: 4px 0 8px 15px; border-left: 2px solid var(--accent);
+  animation: expand .18s ease-out both; }
+@keyframes expand { from { opacity: 0; transform: translateY(-4px); } to { opacity: 1; transform: none; } }
+.gdetail .row { padding: 10px 0; }
+
+#menu-root { position: absolute; inset: 0; z-index: 150; display: none; }
+#menu-root.open { display: block; }
+.menu-pop { position: absolute; width: 292px; max-height: 420px; overflow-y: auto; scrollbar-width: none;
+  background: var(--qam-border); border-radius: 3px; padding: 4px 0;
+  box-shadow: 0 10px 34px rgba(0, 0, 0, .6), 0 0 0 1px rgba(0, 0, 0, .4); }
+.menu-pop::-webkit-scrollbar { display: none; }
+.menu-item { padding: 9px 16px; font-size: 16px; color: var(--fg); cursor: pointer; outline: none; white-space: nowrap; }
+.menu-item:hover { background: rgba(255, 255, 255, .1); }
+.menu-item.gpfocus, .menu-item:focus { background: #fff; color: var(--btn-focus-fg); }
+
+#toast-root { position: absolute; right: 16px; bottom: 56px; z-index: 200;
+  display: flex; flex-direction: column; gap: 10px; pointer-events: none; }
+.toast { pointer-events: auto; width: 344px; display: flex; gap: 12px; align-items: flex-start;
+  background: rgba(26, 29, 33, .97); border-radius: 4px; padding: 12px 14px 12px 0;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, .55); cursor: pointer;
+  animation: toastin .28s cubic-bezier(.16, .86, .43, .99) both; }
+@keyframes toastin { from { transform: translateY(14px); opacity: 0; } to { transform: none; opacity: 1; } }
+.toast .t-icon { flex: none; width: 28px; height: 28px; margin: 0 12px 0 0; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center; }
+.toast .t-icon svg { width: 14px; height: 14px; }
+.toast .t-title { font-size: 12px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase; color: var(--fg-dim); }
+.toast .t-body { font-size: 14px; line-height: 19px; color: var(--fg-bright); margin-top: 2px; }
+.toast .t-sub { font-size: 12px; line-height: 16px; color: var(--fg-dim); margin-top: 2px; }
+
+#hints { position: absolute; left: 0; right: 0; bottom: 0; height: 40px; z-index: 120;
+  display: flex; align-items: center; justify-content: flex-end; gap: 20px; padding-right: 18px;
+  background: rgba(0, 0, 0, .5); }
+.hint { display: flex; align-items: center; gap: 8px; }
+.hint .glyph { width: 24px; height: 24px; border-radius: 50%; background: #fff; color: #000;
+  font-size: 13px; font-weight: 700; display: flex; align-items: center; justify-content: center; }
+.hint .label { font-size: 13px; font-weight: 700; letter-spacing: .5px; text-transform: uppercase; color: #fff; }
+#mock { position: absolute; left: 16px; top: 10px; z-index: 300; width: auto; max-width: 380px;
+  background: rgba(8, 10, 14, .85); border: 1px dashed rgba(255, 255, 255, .28); border-radius: 14px;
+  padding: 4px 12px; color: #cfd6dd; font-size: 12px; line-height: 17px; cursor: pointer; }
+#mock.open { border-radius: 6px; padding: 10px 12px; cursor: default; }
+#mock .head { font-size: 11px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; color: #fff; }
+#mock .body { display: none; }
+#mock.open .body { display: block; margin-top: 6px; }
+#mock a { color: #7fb8e0; text-decoration: none; }
+#mock a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <header id="statusbar">
+    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l4.5 4.5"/></svg>
+    <svg width="22" height="18" viewBox="0 0 24 18" fill="#fff"><path d="M12 14.5a2 2 0 1 1 0 3.5 2 2 0 0 1 0-3.5zM4.9 7.6a10.6 10.6 0 0 1 14.2 0l-2 2.2a7.6 7.6 0 0 0-10.2 0zM0.6 2.9a16.8 16.8 0 0 1 22.8 0l-2 2.2a13.8 13.8 0 0 0-18.8 0z"/></svg>
+    <div class="battery"><span>66%</span>
+      <svg width="26" height="14" viewBox="0 0 26 14"><rect x="1" y="1" width="21" height="12" rx="2" fill="none" stroke="#fff" stroke-width="1.6"/><rect x="23.5" y="4" width="2.5" height="6" rx="1" fill="#fff"/><rect x="3" y="3" width="14" height="8" rx="1" fill="#fff"/></svg>
+    </div>
+    <div class="clock">9:41 PM</div>
+  </header>
+
+  <div id="pagehead">
+    <div class="backbtn" data-focusable id="backbtn" title="Back">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 5l-7 7 7 7"/></svg>
+    </div>
+    <div class="ptitle">SaveLocker</div>
+    <button class="btn compact" id="head-sync">Sync all games</button>
+  </div>
+
+  <div id="chipbar">
+    <div class="jchip active" data-jump="overview">Overview</div>
+    <div class="jchip" data-jump="attention">Attention</div>
+    <div class="jchip" data-jump="games">Games</div>
+    <div class="jchip" data-jump="launch">Launch options</div>
+    <div class="jchip" data-jump="activity">Activity</div>
+    <div class="jchip" data-jump="doctor">Doctor</div>
+  </div>
+
+  <div id="scroll">
+    <div id="inner">
+      <div class="sec" id="sec-overview">
+        <div class="sec-title">This Deck</div>
+        <div class="tiles">
+          <div class="tile"><div class="t-label">Server</div><div class="t-value">Marwan-PC</div></div>
+          <div class="tile"><div class="t-label">Games</div><div class="t-value">14</div></div>
+          <div class="tile"><div class="t-label">Last sync</div><div class="t-value">2m ago</div></div>
+          <div class="tile"><div class="t-label">Agent</div><div class="t-value">v0.3.0</div></div>
+          <div class="tile"><div class="t-label">Plugin</div><div class="t-value">v0.2.4</div></div>
+        </div>
+        <div class="row hidden" id="update-row" style="margin-top:12px;">
+          <div class="row-main">
+            <div class="row-label">v0.3.1 is downloaded and verified</div>
+            <div class="row-desc">Installing restarts the agent — a few seconds, no game is affected.</div>
+          </div>
+          <button class="btn compact" id="install-btn">Install now</button>
+        </div>
+      </div>
+
+      <div class="sec" id="sec-attention">
+        <div class="sec-title">Needs attention</div>
+        <div id="attention-rows"></div>
+      </div>
+
+      <div class="sec" id="sec-games">
+        <div class="sec-title">Games</div>
+        <input class="input" id="gsearch" placeholder="Search games" spellcheck="false">
+        <div class="note" id="gcount"></div>
+        <div id="glist"></div>
+      </div>
+
+      <div class="sec" id="sec-launch">
+        <div class="sec-title">Steam launch options</div>
+        <div class="row" data-focusable id="write-row">
+          <div class="row-main">
+            <div class="row-label">Allow writing to Steam</div>
+            <div class="row-desc">Off: read and show what would change. On: actually set launch options.</div>
+          </div>
+          <div class="toggle" id="write-tg"><i></i></div>
+        </div>
+        <div class="btn-row right"><button class="btn" id="launch-run">Check (no changes)</button></div>
+        <div class="note" id="launch-summary"></div>
+        <div id="launch-rows"></div>
+      </div>
+
+      <div class="sec" id="sec-activity">
+        <div class="sec-title">Activity</div>
+        <div id="activity-rows"></div>
+        <div class="row" data-focusable id="activity-more">
+          <div class="row-main"><div class="row-label" id="activity-more-label">Show all activity</div></div>
+          <svg class="chev down" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+        </div>
+      </div>
+
+      <div class="sec" id="sec-doctor">
+        <div class="sec-title">Doctor</div>
+        <div class="row">
+          <div class="row-main">
+            <div class="row-label">Check this device</div>
+            <div class="row-desc">Makes network calls and takes a few seconds — runs only when you ask.</div>
+          </div>
+          <button class="btn compact" id="doctor-run">Run doctor</button>
+        </div>
+        <div id="doctor-out"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="menu-root"></div>
+  <div id="toast-root"></div>
+
+  <footer id="hints">
+    <div class="hint dynamic"><div class="glyph">A</div><div class="label">Select</div></div>
+    <div class="hint"><div class="glyph">B</div><div class="label">Back</div></div>
+  </footer>
+
+  <div id="mock">
+    <div class="head" id="mock-toggle">Option C — One-page cockpit</div>
+    <div class="body">
+      <div class="note">Sticky jump nav, inline game expansion, zero page switches.
+        <a href="settings-option-a-paged.html">Option A</a> ·
+        <a href="settings-option-b-game-first.html">Option B</a></div>
+    </div>
+  </div>
+</div>
+
+<script>
+"use strict";
+const $ = (sel, root) => (root || document).querySelector(sel);
+const $$ = (sel, root) => Array.from((root || document).querySelectorAll(sel));
+const esc = (s) => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+
+const GAMES = [
+  { id: "ds",  name: "Death Stranding (Director's Cut)", alias: null, cloud: true,  pull: true,  sopen: true,  policy: "Manual",       applied: true,  conflict: true,
+    folder: "~/.steam/steam/steamapps/compatdata/1190460/pfx/drive_c/users/steamuser/Documents/Death Stranding" },
+  { id: "er",  name: "Elden Ring", alias: null, cloud: false, pull: true,  sopen: true,  policy: "NewestWins",   applied: true,  conflict: false,
+    folder: "~/.steam/steam/steamapps/compatdata/1245620/pfx/drive_c/users/steamuser/AppData/Roaming/EldenRing" },
+  { id: "h3",  name: "Halo 3", alias: null, cloud: false, pull: true,  sopen: false, policy: "Manual",       applied: true,  conflict: false,
+    folder: "~/.steam/steam/steamapps/compatdata/1064272/pfx/drive_c/users/steamuser/Documents/My Games/Halo 3" },
+  { id: "bal", name: "Balatro", alias: null, cloud: true,  pull: false, sopen: true,  policy: "Manual",       applied: true,  conflict: false,
+    folder: "~/.steam/steam/steamapps/compatdata/2379780/pfx/drive_c/users/steamuser/AppData/Roaming/Balatro" },
+  { id: "fh",  name: "Forza Horizon", alias: "Forza Horizon", cloud: false, pull: true, sopen: true, policy: "PreferMachine", applied: true, conflict: false,
+    folder: "~/.steam/steam/steamapps/compatdata/3091591690/pfx/drive_c/users/steamuser/Documents/Xenia" },
+];
+const POLICY_OPTIONS = [
+  { data: "Manual", label: "Ask me every time" },
+  { data: "NewestWins", label: "Newest save always wins" },
+  { data: "PreferMachine", label: "Prefer this device" },
+];
+const policyLabel = (p) => (POLICY_OPTIONS.find((o) => o.data === p) || {}).label || "Ask me every time";
+
+let activity = [
+  { at: "2m ago",  msg: "pushed new version for Balatro" },
+  { at: "26m ago", msg: "restored latest save for Death Stranding (Director's Cut)" },
+  { at: "1h ago",  msg: "pull refused for Elden Ring — game is running" },
+  { at: "3h ago",  msg: "pushed new version for Halo 3" },
+  { at: "5h ago",  msg: "no local changes since last sync (all games)" },
+  { at: "8h ago",  msg: "pushed new version for Forza Horizon" },
+];
+let launchChecked = [
+  { name: "Death Stranding (Director's Cut)", state: "ok",    now: "savelocker run -- %command%" },
+  { name: "Elden Ring",                       state: "would", now: "" },
+  { name: "Halo 3",                           state: "ok",    now: "savelocker run -- %command%" },
+  { name: "Balatro",                          state: "ok",    now: "savelocker run -- %command%" },
+  { name: "Forza Horizon",                    state: "ok",    now: "savelocker run -- %command%" },
+];
+let writeEnabled = false;
+let staged = true;
+let expandedId = null;
+let searchQuery = "";
+let activityExpanded = false;
+
+const TOAST_ICONS = {
+  syncing: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12a9 9 0 1 1-3-6.7"/><path d="M21 3v6h-6"/></svg>',
+  success: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8 12.5l3 3 5-6"/></svg>',
+  blocked: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="5" y="10.5" width="14" height="9" rx="2"/><path d="M8.5 10.5V8a3.5 3.5 0 0 1 7 0v2.5"/></svg>',
+  error:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M9 9l6 6M15 9l-6 6"/></svg>',
+  info:    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v5M12 8h.01"/></svg>',
+  conflict:'<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 4v7a4 4 0 0 0 4 4h8"/><path d="M14 12l4 3-4 3"/><path d="M18 4v4a4 4 0 0 1-4 4"/></svg>',
+};
+function toast(kind, body, sub) {
+  const el = document.createElement("div");
+  el.className = "toast";
+  el.innerHTML =
+    `<div class="t-icon" style="background: var(--k-${kind}-bg); color: var(--k-${kind}-fg);">${TOAST_ICONS[kind] || TOAST_ICONS.info}</div>` +
+    `<div style="flex:1; min-width:0;"><div class="t-title">SaveLocker</div>` +
+    `<div class="t-body">${body}</div>` + (sub ? `<div class="t-sub">${sub}</div>` : "") + `</div>`;
+  el.addEventListener("click", () => el.remove());
+  $("#toast-root").appendChild(el);
+  setTimeout(() => { el.style.transition = "opacity .3s"; el.style.opacity = "0"; setTimeout(() => el.remove(), 320); }, 4200);
+}
+
+function setFocus(el) {
+  if (!el) return;
+  if (!el.hasAttribute("tabindex") && el.tagName !== "BUTTON" && el.tagName !== "INPUT") el.setAttribute("tabindex", "-1");
+  $$(".gpfocus", document).forEach((n) => n.classList.remove("gpfocus"));
+  el.focus(); el.classList.add("gpfocus");
+}
+function focusables(scope) {
+  return $$("[data-focusable], button, .jchip, .menu-item", scope || document)
+    .filter((el) => el.offsetParent !== null && !el.hasAttribute("disabled"));
+}
+function currentScope() {
+  if ($("#menu-root").classList.contains("open")) return $("#menu-root");
+  return $("#scroll");
+}
+function move(dir) {
+  const list = focusables(currentScope());
+  if (!list.length) return;
+  const i = list.indexOf(document.activeElement);
+  setFocus(list[i < 0 ? 0 : (i + dir + list.length) % list.length]);
+}
+document.addEventListener("keydown", (e) => {
+  if (e.key === "ArrowDown" || e.key === "ArrowRight" || (e.key === "Tab" && !e.shiftKey)) { e.preventDefault(); move(1); return; }
+  if (e.key === "ArrowUp" || e.key === "ArrowLeft" || (e.key === "Tab" && e.shiftKey)) { e.preventDefault(); move(-1); return; }
+  if (e.key === "Enter" || e.key === " ") {
+    const a = document.activeElement;
+    if (a && a.tagName !== "INPUT" && (a.tagName === "BUTTON" || a.dataset.focusable !== undefined)) { e.preventDefault(); a.click(); }
+    return;
+  }
+  if (e.key === "Escape" || e.key === "b" || e.key === "Backspace") { e.preventDefault(); back(); }
+});
+function back() {
+  if ($("#menu-root").classList.contains("open")) { closeMenu(); return; }
+  toast("info", "B would return to the Quick Access panel");
+}
+document.addEventListener("click", (e) => {
+  const el = e.target.closest("[data-focusable], button, .jchip");
+  if (el && !el.hasAttribute("disabled")) setFocus(el);
+});
+
+function openMenu(anchorEl, items, current, onPick) {
+  const root = $("#menu-root");
+  root.classList.add("open");
+  const rect = anchorEl.getBoundingClientRect();
+  const stageRect = $("#stage").getBoundingClientRect();
+  const scale = stageRect.width / 1280;
+  const pop = document.createElement("div");
+  pop.className = "menu-pop";
+  pop.style.left = `${(rect.left - stageRect.left) / scale}px`;
+  pop.style.top = `${(rect.bottom - stageRect.top) / scale + 4}px`;
+  pop.innerHTML = items.map((it) => `<div class="menu-item">${esc(it.label)}</div>`).join("");
+  root.innerHTML = ""; root.appendChild(pop);
+  const nodes = Array.from(pop.querySelectorAll(".menu-item"));
+  setFocus(nodes.find((n) => n.textContent === current) || nodes[0]);
+  root.onclick = (e) => {
+    const item = e.target.closest(".menu-item");
+    if (!item) return;
+    onPick(items.find((i) => i.label === item.textContent)); closeMenu();
+  };
+  root.onmousedown = (e) => { if (e.target === root) closeMenu(); };
+}
+function closeMenu() { $("#menu-root").classList.remove("open"); $("#menu-root").innerHTML = ""; }
+
+/* Jump nav + scrollspy. */
+function jumpTo(id) {
+  const sec = $("#sec-" + id);
+  $("#scroll").scrollTo({ top: sec.offsetTop - 14, behavior: "smooth" });
+}
+$$(".jchip").forEach((c) => c.addEventListener("click", () => jumpTo(c.dataset.jump)));
+$("#scroll").addEventListener("scroll", () => {
+  const top = $("#scroll").scrollTop + 90;
+  let active = "overview";
+  ["overview", "attention", "games", "launch", "activity", "doctor"].forEach((id) => {
+    if ($("#sec-" + id).offsetTop <= top) active = id;
+  });
+  $$(".jchip").forEach((c) => c.classList.toggle("active", c.dataset.jump === active));
+});
+
+/* Overview. */
+$("#update-row").classList.remove("hidden");
+$("#install-btn").addEventListener("click", () => {
+  const b = $("#install-btn");
+  b.disabled = true; b.textContent = "Installing…";
+  setTimeout(() => {
+    staged = false;
+    $("#update-row").classList.add("hidden");
+    toast("success", "Installed. Now running v0.3.1.", "The agent restarted");
+  }, 2200);
+});
+$("#head-sync").addEventListener("click", () => {
+  const b = $("#head-sync");
+  b.disabled = true; b.textContent = "Syncing…";
+  setTimeout(() => {
+    b.disabled = false; b.textContent = "Sync all games";
+    activity.unshift({ at: "just now", msg: "pushed new version for Death Stranding (Director's Cut)" });
+    renderActivity();
+    toast("success", "sync all games finished", "Saves are up to date everywhere");
+  }, 2000);
+});
+
+/* Attention. */
+let leaseDismissed = false;
+function renderAttention() {
+  const rows = [];
+  for (const g of GAMES.filter((x) => x.conflict)) {
+    rows.push(`<div class="row" data-focusable data-open="${g.id}">
+      <span class="dot conflict"></span>
+      <div class="row-main">
+        <div class="row-label">Save conflict — ${esc(g.name)}</div>
+        <div class="row-desc">Expand it below to pick a save, or open the game directly.</div>
+      </div>
+      <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+    </div>`);
+  }
+  if (!leaseDismissed) {
+    rows.push(`<div class="row">
+      <span class="dot warning"></span>
+      <div class="row-main">
+        <div class="row-label">Checked out elsewhere — Elden Ring</div>
+        <div class="row-desc">Open on Deck-B. Playing here may cause a conflict.</div>
+      </div>
+      <button class="btn compact" id="lease-dismiss">Dismiss</button>
+    </div>`);
+  }
+  $("#attention-rows").innerHTML = rows.length ? rows.join("") : `<div class="empty">All clear.</div>`;
+  const dis = $("#lease-dismiss");
+  if (dis) dis.addEventListener("click", (e) => {
+    e.stopPropagation();
+    leaseDismissed = true; renderAttention();
+    toast("info", "Notice dismissed", "It returns if the lease is still held");
+  });
+  $$("#attention-rows .row[data-open]").forEach((row) => row.addEventListener("click", () => {
+    expandGame(row.dataset.open, true);
+  }));
+}
+
+/* Games with inline expansion. */
+function gameChip(g) { return g.conflict ? "conflict" : "ok"; }
+function gameChipLabel(g) { return g.conflict ? "Conflict" : "In sync"; }
+function renderGames() {
+  const q = searchQuery.trim().toLowerCase();
+  const list = GAMES.filter((g) => q === "" || g.name.toLowerCase().includes(q) || (g.alias || "").toLowerCase().includes(q));
+  $("#gcount").textContent = q === "" ? `${GAMES.length} tracked` : `${list.length} of ${GAMES.length}`;
+  $("#glist").innerHTML = list.length === 0
+    ? `<div class="empty">No games match "${esc(searchQuery.trim())}".</div>`
+    : list.map((g) => `
+      <div class="grow-wrap">
+        <div class="row" data-focusable data-game="${g.id}">
+          <span class="dot ${gameChip(g)}"></span>
+          <div class="row-main">
+            <div class="row-label">${esc(g.name)}</div>
+            <div class="row-desc">${g.alias ? "alias: " + esc(g.alias) + " · " : ""}${g.cloud ? "Steam Cloud" : "no Steam Cloud"} · ${g.pull ? "pulls before launch" : "no pre-launch pull"}</div>
+          </div>
+          <span class="chip ${gameChip(g)}">${gameChipLabel(g)}</span>
+          <svg class="chev ${expandedId === g.id ? "down" : ""}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+        </div>
+        ${expandedId === g.id ? gameDetailHtml(g) : ""}
+      </div>`).join("");
+  $$("#glist .row[data-game]").forEach((row) => row.addEventListener("click", () => {
+    toggleGame(row.dataset.game);
+  }));
+  if (expandedId) wireGameDetail(GAMES.find((g) => g.id === expandedId));
+}
+function gameDetailHtml(g) {
+  return `
+    <div class="gdetail">
+      <div class="row">
+        <div class="row-main">
+          <div class="row-label">Save folder</div>
+          <div class="row-desc" style="word-break:break-all;">${esc(g.folder)}</div>
+        </div>
+      </div>
+      <div class="row" data-focusable id="gd-pull">
+        <div class="row-main">
+          <div class="row-label">Pull before launch</div>
+          <div class="row-desc">${g.cloud ? "Off by default: Steam Cloud already handles this title." : "On: the save is current before the game starts."}</div>
+        </div>
+        <div class="toggle ${g.pull ? "on" : ""}" id="gd-pull-tg"><i></i></div>
+      </div>
+      <div class="row ${g.pull ? "" : "hidden"}" data-focusable id="gd-sopen">
+        <div class="row-main">
+          <div class="row-label">Sync on page open</div>
+          <div class="row-desc">Moves the pull to the library page, so Play starts instantly.</div>
+        </div>
+        <div class="toggle ${g.sopen ? "on" : ""}" id="gd-sopen-tg"><i></i></div>
+      </div>
+      <div class="row" data-focusable id="gd-alias">
+        <div class="row-main">
+          <div class="row-label">Alias</div>
+          <div class="row-desc">Used when matching a launch to this game.</div>
+        </div>
+        <div class="row-value" id="gd-alias-val">${esc(g.alias || g.name)}</div>
+        <svg class="chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+      </div>
+      <div class="hidden" id="gd-alias-edit">
+        <input class="input" id="gd-alias-input" value="${esc(g.alias || g.name)}" spellcheck="false">
+        <div class="btn-row right">
+          <button class="btn" id="gd-alias-cancel">Cancel</button>
+          <button class="btn" id="gd-alias-save">Save</button>
+        </div>
+      </div>
+      <div class="row" data-focusable id="gd-policy">
+        <div class="row-main">
+          <div class="row-label">If a save conflict happens</div>
+          ${g.policy === "PreferMachine" ? '<div class="row-desc">Currently prefers a different device — set from the dashboard.</div>' : ""}
+        </div>
+        <div class="row-value" id="gd-policy-val">${esc(policyLabel(g.policy))}</div>
+        <svg class="chev down" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg>
+      </div>
+      <div class="row">
+        <button class="btn compact" id="gd-sync">Sync this game</button>
+        <button class="btn compact" id="gd-check">Check sync status</button>
+        ${g.conflict ? `<button class="btn compact" id="gd-resolve">Resolve conflict</button>` : ""}
+        <div class="row-main"></div>
+        <span class="note" id="gd-status-note"></span>
+      </div>
+    </div>`;
+}
+function wireGameDetail(g) {
+  $("#gd-pull").addEventListener("click", () => {
+    g.pull = !g.pull;
+    $("#gd-pull-tg").classList.toggle("on", g.pull);
+    $("#gd-sopen").classList.toggle("hidden", !g.pull);
+    toast(g.pull ? "success" : "info", g.pull ? `Pull before launch on for ${g.name}` : `Pull before launch off for ${g.name}`,
+      g.pull && g.cloud ? "You turned this on for a Steam Cloud title — it may fight Cloud sync" : undefined);
+  });
+  $("#gd-sopen").addEventListener("click", () => {
+    g.sopen = !g.sopen;
+    $("#gd-sopen-tg").classList.toggle("on", g.sopen);
+  });
+  $("#gd-alias").addEventListener("click", () => {
+    $("#gd-alias").classList.add("hidden");
+    $("#gd-alias-edit").classList.remove("hidden");
+    setFocus($("#gd-alias-input"));
+  });
+  $("#gd-alias-cancel").addEventListener("click", () => {
+    $("#gd-alias-edit").classList.add("hidden");
+    $("#gd-alias").classList.remove("hidden");
+  });
+  $("#gd-alias-save").addEventListener("click", () => {
+    const v = $("#gd-alias-input").value.trim();
+    g.alias = v === "" || v === g.name ? null : v;
+    $("#gd-alias-val").textContent = g.alias || g.name;
+    $("#gd-alias-edit").classList.add("hidden");
+    $("#gd-alias").classList.remove("hidden");
+    toast("success", "Alias saved", g.alias ? `Games launching as "${g.alias}" now match` : "Back to the game's own name");
+  });
+  $("#gd-policy").addEventListener("click", () => {
+    openMenu($("#gd-policy"), POLICY_OPTIONS, policyLabel(g.policy), (picked) => {
+      g.policy = picked.data;
+      $("#gd-policy-val").textContent = picked.label;
+    });
+  });
+  $("#gd-sync").addEventListener("click", () => {
+    const b = $("#gd-sync");
+    b.disabled = true; b.textContent = "Syncing…";
+    setTimeout(() => {
+      activity.unshift({ at: "just now", msg: `pushed new version for ${g.name}` });
+      renderActivity();
+      toast("success", `${g.name} synced`);
+      renderGames();
+    }, 1500);
+  });
+  $("#gd-check").addEventListener("click", () => {
+    const b = $("#gd-check");
+    b.disabled = true; b.textContent = "Checking…";
+    $("#gd-status-note").textContent = "hashing the save folder…";
+    setTimeout(() => {
+      b.disabled = false; b.textContent = "Check again";
+      $("#gd-status-note").textContent = g.conflict ? "out of sync — a conflict is open" : "in sync with the cloud";
+    }, 1400);
+  });
+  const r = $("#gd-resolve");
+  if (r) r.addEventListener("click", () => conflictModal(g));
+}
+function toggleGame(id) {
+  expandedId = expandedId === id ? null : id;
+  renderGames();
+  if (expandedId) {
+    const row = $(`#glist .row[data-game="${id}"]`);
+    if (row) setFocus(row);
+  }
+}
+function expandGame(id, scroll) {
+  expandedId = id;
+  renderGames();
+  if (scroll) {
+    // #scroll is the offsetParent (position:relative), so a row's offsetTop is already relative
+    // to the scroll content — adding the section's own offset would double-count.
+    const row = $(`#glist .row[data-game="${id}"]`);
+    if (row) $("#scroll").scrollTo({ top: row.offsetTop - 60, behavior: "smooth" });
+  }
+}
+$("#gsearch").addEventListener("input", (e) => { searchQuery = e.target.value; renderGames(); });
+
+/* Conflict resolve as an inline sheet (no page switch; keeps the one-page promise). */
+function conflictModal(g) {
+  const row = $(`#glist .row[data-game="${g.id}"]`);
+  if (!row) return;
+  expandedId = g.id;
+  renderGames();
+  const wrap = $(`#glist .row[data-game="${g.id}"]`).nextElementSibling;
+  wrap.querySelector(".gdetail").insertAdjacentHTML("afterbegin", `
+    <div class="row" style="flex-wrap:wrap; align-items:flex-start;">
+      <div class="row-main">
+        <div class="row-label" style="color:var(--fg-bright);">Your save and the cloud have both changed</div>
+        <div class="row-desc">Pick which save to keep — the other one is never deleted right now, just set aside.</div>
+      </div>
+    </div>
+    <div style="display:flex; gap:10px; padding: 4px 0 8px;">
+      <div class="row" data-focusable id="c-local" style="flex:1; flex-direction:column; align-items:flex-start; background:rgba(255,255,255,.05); border:1px solid rgba(255,255,255,.12); border-radius:8px; padding:12px;">
+        <div class="row-label" style="font-weight:700; font-size:13px;">This Device</div>
+        <div style="font-size:14px; margin:6px 0 2px;">12 minutes ago</div>
+        <div class="row-desc">6 files · 1.42 MB</div>
+        <button class="btn compact" style="margin-top:10px; width:100%;">Keep This Device</button>
+      </div>
+      <div class="row" data-focusable id="c-cloud" style="flex:1; flex-direction:column; align-items:flex-start; background:rgba(255,255,255,.05); border:1px solid rgba(255,255,255,.12); border-radius:8px; padding:12px;">
+        <div class="row-label" style="font-weight:700; font-size:13px;">The Cloud <span class="chip ok" style="font-size:9.5px;">Newer</span></div>
+        <div style="font-size:14px; margin:6px 0 2px;">8 minutes ago</div>
+        <div class="row-desc">6 files · 1.44 MB · from "Deck-B"</div>
+        <button class="btn compact" style="margin-top:10px; width:100%;">Keep The Cloud</button>
+      </div>
+    </div>`);
+  const done = (which) => {
+    g.conflict = false;
+    renderGames(); renderAttention();
+    toast("success", `${g.name} — conflict resolved`, `Kept ${which}`);
+  };
+  $("#c-local").addEventListener("click", () => done("This Device"));
+  $("#c-cloud").addEventListener("click", () => done("The Cloud"));
+  setFocus($("#c-local"));
+}
+
+/* Launch options. */
+function renderLaunch() {
+  $("#write-tg").classList.toggle("on", writeEnabled);
+  $("#launch-run").textContent = writeEnabled ? "Apply now" : "Check (no changes)";
+  const n = (s) => launchChecked.filter((o) => o.state === s).length;
+  $("#launch-summary").textContent = `${launchChecked.length} games · ${n("ok")} already set · ${n("would")} would change · ${n("written")} set`;
+  $("#launch-rows").innerHTML = launchChecked.map((o) => `
+    <div class="row">
+      <div class="row-main">
+        <div class="row-label">${esc(o.name)} <span class="chip ${o.state === "ok" ? "info" : o.state === "would" ? "blocked" : "ok"}">${o.state === "ok" ? "ok" : o.state === "would" ? "would change" : "set"}</span></div>
+        ${o.state === "would" ? `<div class="row-desc">now: ${o.now === "" ? "(empty)" : esc(o.now)}<br>target: savelocker run -- %command%</div>` : ""}
+      </div>
+    </div>`).join("");
+}
+$("#write-row").addEventListener("click", () => {
+  writeEnabled = !writeEnabled;
+  renderLaunch();
+  toast(writeEnabled ? "blocked" : "info", writeEnabled ? "Writing to Steam is ON" : "Writing to Steam is OFF",
+    writeEnabled ? "The next run actually sets launch options" : undefined);
+});
+$("#launch-run").addEventListener("click", () => {
+  const b = $("#launch-run");
+  b.disabled = true; b.textContent = writeEnabled ? "Applying…" : "Checking…";
+  setTimeout(() => {
+    b.disabled = false;
+    if (writeEnabled) {
+      const changed = launchChecked.filter((o) => o.state === "would");
+      changed.forEach((o) => { o.state = "written"; o.now = "savelocker run -- %command%"; });
+      renderLaunch();
+      toast("success", `${changed.length} launch option${changed.length === 1 ? "" : "s"} set`);
+    } else {
+      renderLaunch();
+      toast("info", "Check finished", "Nothing was written to Steam");
+    }
+  }, 1600);
+});
+
+/* Activity. */
+function renderActivity() {
+  const shown = activityExpanded ? activity : activity.slice(0, 4);
+  $("#activity-rows").innerHTML = shown.map((a) => `
+    <div class="row">
+      <div class="row-main">
+        <div class="row-label" style="font-size:15px;">${esc(a.msg)}</div>
+        <div class="row-desc">${esc(a.at)}</div>
+      </div>
+    </div>`).join("");
+  $("#activity-more-label").textContent = activityExpanded ? "Show less" : `Show all activity (${activity.length})`;
+}
+$("#activity-more").addEventListener("click", () => { activityExpanded = !activityExpanded; renderActivity(); });
+
+/* Doctor. */
+$("#doctor-run").addEventListener("click", () => {
+  const b = $("#doctor-run");
+  b.disabled = true; b.textContent = "Running…";
+  $("#doctor-out").innerHTML = "";
+  setTimeout(() => {
+    b.disabled = false; b.textContent = "Run again";
+    $("#doctor-out").innerHTML = `
+      <div class="note">Exited 1 — see below.</div>
+      <div class="pre">savelocker doctor
+  config:      OK
+  api-token:   OK (~/.local/share/SaveLocker/api-token)
+  service:     OK (savelocker.service active)
+  port 5178:   OK
+  launch-opts: 4 of 5 games set, 1 would change (Elden Ring)
+  hint:        run "savelocker launch-options" for every game</div>`;
+  }, 1800);
+});
+
+/* Init. */
+renderAttention();
+renderGames();
+renderLaunch();
+renderActivity();
+$("#backbtn").addEventListener("click", back);
+
+const initial = location.hash.replace("#", "");
+if (["overview", "attention", "games", "launch", "activity", "doctor"].includes(initial)) jumpTo(initial);
+setTimeout(() => setFocus(focusables($("#scroll"))[0]), 150);
+
+function fit() {
+  const s = Math.min(window.innerWidth / 1300, window.innerHeight / 830, 1);
+  $("#stage").style.transform = `scale(${s})`;
+}
+window.addEventListener("resize", fit);
+fit();
+$("#mock-toggle").addEventListener("click", () => $("#mock").classList.toggle("open"));
+</script>
+</body>
+</html>
