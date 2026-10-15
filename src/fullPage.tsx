@@ -181,8 +181,9 @@ const STICK_PX_PER_UNIT = 0.45
 /** A jump this large between two messages ~2 ms apart is the total being reset (analog messages
  * re-enabled, controller reconnected), not stick travel — dropped rather than scrolled. */
 const STICK_MAX_STEP = 200
-/** Which way is up — see `useRightStickScroll`. */
-const STICK_UP_IS_POSITIVE = true
+/** Which way is up — see `useRightStickScroll`. Confirmed on a Deck: pushing the stick up runs
+ * the total DOWN, the opposite of what the first capture suggested. */
+const STICK_UP_IS_POSITIVE = false
 
 /** The scroll container of whichever page is showing — found from its own marker under this
  * page's root, since Steam's container classes are build-hashed and only the active page's content
@@ -216,8 +217,8 @@ function activePageScroller(root: HTMLElement | null): HTMLElement | null {
  * analog messages ON and closing it turns them OFF again, which would otherwise silently end right-
  * stick scrolling for the rest of the visit. Disabled on leaving, to hand the setting back as found.
  *
- * Direction: the total's sign convention is not documented; `STICK_UP_IS_POSITIVE` follows the
- * capture's first push. Flip it if the stick scrolls the wrong way.
+ * Direction: the total's sign convention is not documented anywhere; `STICK_UP_IS_POSITIVE` is
+ * set from testing on hardware (stick up lowers the total, like a mouse moving up the screen).
  */
 function useRightStickScroll(rootRef: React.RefObject<HTMLDivElement | null>): void {
   useEffect(() => {
