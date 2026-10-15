@@ -884,6 +884,12 @@ function resetFullPageScroll(): void {
  * Decky's route for `/savelocker` is not `exact`, so `/savelocker/games` still renders this
  * component; the bare route (what the QAM's Settings row navigates to) matches no page and the
  * dialog falls back to the first one, Status. Decky's own settings page is built the same way.
+ *
+ * `visible: true` is not optional either, despite reading like a default. The page list keeps a
+ * separator only when some page after it has `visible` explicitly truthy, and otherwise drops it —
+ * while the highlighted entry is still picked by index into the UNfiltered list. With `visible`
+ * unset the separator vanished and every page below it was off by one on hardware: on Activity,
+ * Diagnostics lit up; on Diagnostics, nothing did.
  */
 const pageRoute = (page: string) => `${SAVELOCKER_PAGE_ROUTE}/${page}`
 
@@ -906,12 +912,12 @@ export function FullPage() {
         title="SaveLocker"
         showTitle
         pages={[
-          { title: 'Status', content: <StatusPage />, icon: <FaShieldAlt />, route: pageRoute('status') },
-          { title: 'Games', content: <GamesPage />, icon: <FaGamepad />, route: pageRoute('games') },
-          { title: 'Launch options', content: <LaunchOptionsPage />, icon: <FaRocket />, route: pageRoute('launch') },
+          { title: 'Status', content: <StatusPage />, icon: <FaShieldAlt />, route: pageRoute('status'), visible: true },
+          { title: 'Games', content: <GamesPage />, icon: <FaGamepad />, route: pageRoute('games'), visible: true },
+          { title: 'Launch options', content: <LaunchOptionsPage />, icon: <FaRocket />, route: pageRoute('launch'), visible: true },
           'separator',
-          { title: 'Activity', content: <ActivityPage />, icon: <FaHistory />, route: pageRoute('activity') },
-          { title: 'Diagnostics', content: <DiagnosticsPage />, icon: <FaStethoscope />, route: pageRoute('diagnostics') },
+          { title: 'Activity', content: <ActivityPage />, icon: <FaHistory />, route: pageRoute('activity'), visible: true },
+          { title: 'Diagnostics', content: <DiagnosticsPage />, icon: <FaStethoscope />, route: pageRoute('diagnostics'), visible: true },
         ]}
       />
     </div>
