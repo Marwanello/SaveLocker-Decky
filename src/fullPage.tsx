@@ -164,6 +164,82 @@ function ScrollBlock({ children }: { children: React.ReactNode }) {
   )
 }
 
+/** `EAnalogInput` value Steam sends for its gamepad-UI scroll binding — the right stick. */
+const GAMEPAD_ANALOG_SCROLL = 47
+/** Below this deflection the stick is resting, not asking to scroll (sticks never read exactly 0). */
+const STICK_DEADZONE = 0.15
+/** Pixels per frame at full deflection — about 1100 px/s at 60 fps, a long page in a second or two. */
+const STICK_MAX_SPEED = 18
+/** A held stick keeps reporting; silence this long means the message stream stopped, so stop with it
+ * rather than scrolling forever on the last value seen. */
+const STICK_STALE_MS = 150
+/** Which way up is on the y axis — see `useRightStickScroll`. */
+const STICK_UP_IS_POSITIVE = true
+
+/** The scroll container of whichever page is showing — found from its own marker, since Steam's
+ * container classes are build-hashed and only the active page's content is mounted. */
+function activePageScroller(): HTMLElement | null {
+  const marker = Array.from(document.querySelectorAll('.savelocker-page')).find((el) => (el as HTMLElement).offsetParent !== null)
+  return marker ? scrollParent(marker) : null
+}
+
+/**
+ * Right-stick scrolling for the whole page, independent of focus.
+ *
+ * Steam's navigation only ever turns the LEFT stick into direction presses (its button map has no
+ * right-stick directions). The right stick arrives as `GAMEPAD_ANALOG_SCROLL` analog messages, and
+ * only while analog messages are enabled — which Steam does for its own virtual keyboard and
+ * nothing else — so this enables them for as long as the page is open and scrolls by deflection,
+ * smoothly, while the stick is held. Focus does not move, exactly like scrolling with a trackpad.
+ *
+ * Re-enabled once a second: opening the virtual keyboard (the Games search, an alias edit) turns
+ * analog messages ON and closing it turns them OFF again, which would otherwise silently end right-
+ * stick scrolling for the rest of the visit. Disabled on leaving, to hand the setting back as found.
+ *
+ * The y sign (stick up = positive, scroll up) and the value range are not documented anywhere; a
+ * value outside ±1 is treated as a raw int16 axis. Unverified on hardware — if the direction is
+ * inverted on a Deck, flip `STICK_UP_IS_POSITIVE`.
+ */
+function useRightStickScroll(): void {
+  useEffect(() => {
+    const input = SteamClient.Input
+    if (!input?.RegisterForControllerAnalogInputMessages || !input.EnableControllerAnalogInputMessages) return
+
+    let y = 0
+    let lastMessage = 0
+    let frame: number | null = null
+
+    const tick = () => {
+      frame = null
+      if (Date.now() - lastMessage > STICK_STALE_MS) y = 0
+      if (Math.abs(y) < STICK_DEADZONE) return
+      const scroller = activePageScroller()
+      if (scroller) {
+        const speed = ((Math.abs(y) - STICK_DEADZONE) / (1 - STICK_DEADZONE)) * STICK_MAX_SPEED
+        const up = STICK_UP_IS_POSITIVE ? y > 0 : y < 0
+        scroller.scrollTop += up ? -speed : speed
+      }
+      frame = requestAnimationFrame(tick)
+    }
+
+    const reg = input.RegisterForControllerAnalogInputMessages((_controller, action, _active, _x, rawY) => {
+      if (action !== GAMEPAD_ANALOG_SCROLL) return
+      y = Math.abs(rawY) > 1 ? rawY / 32767 : rawY
+      lastMessage = Date.now()
+      if (frame === null && Math.abs(y) >= STICK_DEADZONE) frame = requestAnimationFrame(tick)
+    })
+    input.EnableControllerAnalogInputMessages(true)
+    const keepEnabled = setInterval(() => input.EnableControllerAnalogInputMessages?.(true), 1000)
+
+    return () => {
+      clearInterval(keepEnabled)
+      if (frame !== null) cancelAnimationFrame(frame)
+      try { reg.unregister() } catch { /* already gone */ }
+      input.EnableControllerAnalogInputMessages?.(false)
+    }
+  }, [])
+}
+
 /**
  * "Install update now", the full-page half of the QAM's own StagedUpdate.
  *
@@ -956,7 +1032,12 @@ function resetFullPageScroll(): void {
  */
 const pageRoute = (page: string) => `${SAVELOCKER_PAGE_ROUTE}/${page}`
 
+/** Marks a page's content so `activePageScroller` can find the container that scrolls it. */
+const page = (content: React.ReactNode) => <div className="savelocker-page">{content}</div>
+
 export function FullPage() {
+  useRightStickScroll()
+
   useEffect(() => {
     resetFullPageScroll()
     const raf = requestAnimationFrame(resetFullPageScroll)
@@ -975,12 +1056,12 @@ export function FullPage() {
         title="SaveLocker"
         showTitle
         pages={[
-          { title: 'Status', content: <StatusPage />, icon: <FaShieldAlt />, route: pageRoute('status'), visible: true },
-          { title: 'Games', content: <GamesPage />, icon: <FaGamepad />, route: pageRoute('games'), visible: true },
-          { title: 'Launch options', content: <LaunchOptionsPage />, icon: <FaRocket />, route: pageRoute('launch'), visible: true },
+          { title: 'Status', content: page(<StatusPage />), icon: <FaShieldAlt />, route: pageRoute('status'), visible: true },
+          { title: 'Games', content: page(<GamesPage />), icon: <FaGamepad />, route: pageRoute('games'), visible: true },
+          { title: 'Launch options', content: page(<LaunchOptionsPage />), icon: <FaRocket />, route: pageRoute('launch'), visible: true },
           'separator',
-          { title: 'Activity', content: <ActivityPage />, icon: <FaHistory />, route: pageRoute('activity'), visible: true },
-          { title: 'Diagnostics', content: <DiagnosticsPage />, icon: <FaStethoscope />, route: pageRoute('diagnostics'), visible: true },
+          { title: 'Activity', content: page(<ActivityPage />), icon: <FaHistory />, route: pageRoute('activity'), visible: true },
+          { title: 'Diagnostics', content: page(<DiagnosticsPage />), icon: <FaStethoscope />, route: pageRoute('diagnostics'), visible: true },
         ]}
       />
     </div>
