@@ -1,11 +1,11 @@
 import { useEffect, useState } from 'react'
 import {
-  ButtonItem, ConfirmModal, DropdownItem, Focusable, Navigation, PanelSection, PanelSectionRow,
-  showModal, staticClasses,
+  ButtonItem, ConfirmModal, DialogButton, DropdownItem, Field, Focusable, ModalRoot, Navigation, PanelSection,
+  PanelSectionRow, showModal, staticClasses,
 } from '@decky/ui'
 import { callable, definePlugin, routerHook, toaster } from '@decky/api'
-import { FaCodeBranch, FaGamepad } from 'react-icons/fa'
-import { GamingSyncSettings, registerGamingModeSync, setConflictHooks, unregisterGamingModeSync } from './gamingSync'
+import { FaChevronRight, FaGamepad } from 'react-icons/fa'
+import { GamingSyncToggle, registerGamingModeSync, setConflictHooks, unregisterGamingModeSync } from './gamingSync'
 import { classifySyncOutput } from './syncStatus'
 import { registerLibraryOverlay, unregisterLibraryOverlay } from './libraryOverlay'
 import {
@@ -13,11 +13,12 @@ import {
   unregisterConflictPolling, useOpenConflicts,
 } from './conflicts'
 import { FullPage, SAVELOCKER_PAGE_ROUTE } from './fullPage'
-import { DlcHolds } from './dlcHolds'
+import { openDlcHoldModal, useDlcHolds } from './dlcHolds'
 import { installStagedUpdate } from './stagedUpdate'
+import { KIND_STYLE, saveLockerToast, type ToastKind } from './toast'
 import {
-  ReadOnlyRow, applyAll, fetchActivity, fetchGames, fetchState, fetchVersion, runSync,
-  type ActivityDto, type AgentResult, type AgentState, type AgentVersion, type Conflict, type TrackedGame,
+  applyAll, fetchActivity, fetchGames, fetchState, fetchVersion, runDoctor, runSync, timeAgo,
+  type ActivityDto, type AgentResult, type AgentState, type AgentVersion, type DoctorResult, type TrackedGame,
 } from './shared'
 
 /**
@@ -35,453 +36,476 @@ import {
  * values out of Steam, asks the agent to merge them, and writes back what it is told. The rule
  * lives in the agent (`LaunchOptions.cs`), where it is tested without Steam or hardware, so the
  * command can change without a plugin release. See shared.tsx's `applyAll` for that whole pass.
+ *
+ * Panel layout (docs/tasks/qam-ui-redesign/mockup.html): a status hero that answers "is it working"
+ * in one stop, then "Needs attention" only when something does (one row per item; its actions sit
+ * behind the row in a dialog), then Sync (target, Sync now, last result, Advanced) and More. The
+ * old panel stacked ~9 sections and ~20 focus stops, most of them per-item button pairs and raw
+ * agent output; every one of those still exists, one press deeper.
  */
 
 const dismissWarning = callable<[string], AgentResult<null>>('dismiss_warning')
 
-/**
- * "Your other machine has this game checked out."
- *
- * This is the highest-value thing in the panel and the reason the status surface exists at all. The
- * agent records lease warnings durably on disk precisely so they survive to *some* UI, but until now
- * that UI was the agent's web UI or the server console — neither of which anyone is looking at while
- * holding a Deck about to press play. Here it reaches the user at the only moment it can act on.
- */
-function LeaseWarnings({ warnings, onDismiss }: {
-  warnings: AgentState['leaseWarnings']
-  onDismiss: (gameName: string) => void
-}) {
-  if (warnings.length === 0) return null
+/** A status dot in the toast palette — the hero, the attention rows, the library chip and the
+ * toasts all say "conflict" or "blocked" in the same colour. */
+function Dot({ kind }: { kind: ToastKind }) {
   return (
-    <PanelSection title="Checked out elsewhere">
-      {warnings.map((w) => (
-        <PanelSectionRow key={w.gameName}>
-          <ReadOnlyRow>
-            <div style={{ fontSize: '0.85em' }}><b>{w.gameName}</b></div>
-            <div style={{ opacity: 0.75 }}>
-              open on {w.holderMachine}. Playing here may cause a conflict.
-            </div>
-          </ReadOnlyRow>
-        </PanelSectionRow>
-      ))}
-      {warnings.map((w) => (
-        <PanelSectionRow key={`dismiss-${w.gameName}`}>
-          {/* Dismiss clears the notice, not the condition — if the lease is still held the agent
-              records it again. That is right: the warning exists to be seen before launching. */}
-          <ButtonItem layout="below" onClick={() => onDismiss(w.gameName)}>
-            Dismiss {w.gameName}
-          </ButtonItem>
-        </PanelSectionRow>
-      ))}
-    </PanelSection>
+    <span style={{
+      display: 'inline-block', flexShrink: 0, width: '9px', height: '9px', borderRadius: '50%',
+      background: KIND_STYLE[kind].fg,
+    }}
+    />
   )
 }
 
 /**
- * "Your save and the cloud have both changed" — reachable from the QAM even without the library
- * page open, structurally identical to `LeaseWarnings` above (one focusable read-only row per
- * conflict, since Steam's D-pad scroll needs a run of focusable blocks with no gaps between them —
- * see `LeaseWarnings`'s own doc comment). The resolve button opens the same popup the library page's
- * chip and `savelocker ui`'s Conflicts screen both use, `openConflictResolveModal` from
- * `conflicts.tsx`.
+ * One row that opens something: a dialog, a menu, the full page.
+ *
+ * A focusable `Field` rather than a button, because the row carries a label and a description and a
+ * button cannot without looking like a wall of text — and a chevron says "this goes somewhere" the
+ * way Steam's own settings rows do. `onActivate` is the gamepad's A, `onClick` a touch or mouse.
  */
-function ConflictWarnings({ conflicts, games, onOpen }: {
-  conflicts: Conflict[]
-  games: TrackedGame[]
-  onOpen: (conflictId: string) => void
+function NavRow({ label, description, dot, onOpen, chevron = true }: {
+  label: string
+  description?: React.ReactNode
+  dot?: ToastKind
+  onOpen: () => void
+  chevron?: boolean
 }) {
-  if (conflicts.length === 0) return null
-  const nameFor = (c: Conflict) => games.find((g) => g.gameId === c.gameId)?.name ?? 'A tracked game'
   return (
-    <PanelSection title="Save conflicts">
-      {conflicts.map((c) => (
-        <PanelSectionRow key={c.id}>
-          <ReadOnlyRow>
-            <div style={{ fontSize: '0.85em' }}><FaCodeBranch style={{ marginRight: '6px' }} /><b>{nameFor(c)}</b></div>
-            <div style={{ opacity: 0.75 }}>
-              This device and the cloud both changed since the last sync
-              {c.escalated ? ' — unresolved for a while' : ''}.
-            </div>
-          </ReadOnlyRow>
-        </PanelSectionRow>
-      ))}
-      {conflicts.map((c) => (
-        <PanelSectionRow key={`resolve-${c.id}`}>
-          <ButtonItem layout="below" onClick={() => onOpen(c.id)}>
-            Resolve {nameFor(c)}
-          </ButtonItem>
-        </PanelSectionRow>
-      ))}
-    </PanelSection>
+    <PanelSectionRow>
+      <Field
+        focusable
+        highlightOnFocus
+        bottomSeparator="none"
+        label={(
+          <span style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            {dot && <Dot kind={dot} />}
+            {label}
+          </span>
+        )}
+        description={description}
+        childrenLayout="inline"
+        childrenContainerWidth="min"
+        onActivate={onOpen}
+        onClick={onOpen}
+      >
+        {chevron && <FaChevronRight style={{ fontSize: '12px', color: '#8b929a' }} />}
+      </Field>
+    </PanelSectionRow>
   )
 }
 
-/**
- * Read-only status.
- *
- * The whole block is ONE Focusable, and that shape is deliberate. Steam's Quick Access panel scrolls
- * by moving focus, so a run of non-focusable rows between focusable ones is a hole the D-pad cannot
- * land in: scrolling up into it reveals a line, finds nothing to focus, and jumps to the back button
- * — leaving the user toggling up/down to inch through. One focusable block is a single stop that
- * scrolls into view whole. Several focusable lines would fix the jumping too, but would make the
- * user press down five times to get past information they only read.
- */
-function Status({ state, version }: { state: AgentState | null; version: AgentVersion | null }) {
-  if (!state) return null
-  const line = (label: string, value: string) => (
-    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.85em', gap: '8px' }}>
-      <span style={{ opacity: 0.7 }}>{label}</span>
-      <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{value}</span>
+/** The plain dialog shell every QAM dialog below shares: title, one paragraph, then its controls. */
+function QamDialog({ title, sub, closeModal, children }: {
+  title: string
+  sub?: React.ReactNode
+  closeModal?: () => void
+  children: React.ReactNode
+}) {
+  return (
+    <ModalRoot closeModal={closeModal} onCancel={closeModal}>
+      <div style={{ padding: '20px', maxWidth: '560px' }}>
+        <div style={{ fontSize: '16px', fontWeight: 700, marginBottom: '8px' }}>{title}</div>
+        {sub && <div style={{ fontSize: '13px', opacity: 0.75, lineHeight: 1.5, marginBottom: '16px' }}>{sub}</div>}
+        {children}
+      </div>
+    </ModalRoot>
+  )
+}
+
+/** The agent's own output, verbatim. Read-only and not a focus stop — the dialog's buttons are. */
+function AgentOutput({ text }: { text: string }) {
+  const lines = text.split('\n').filter((l) => l.trim() !== '').slice(-30)
+  return (
+    <div style={{
+      background: 'rgba(0,0,0,0.35)', borderRadius: '2px', padding: '8px 10px', marginBottom: '16px',
+      fontFamily: 'var(--font-mono, monospace)', fontSize: '12px', lineHeight: 1.45,
+      whiteSpace: 'pre-wrap', wordBreak: 'break-word',
+    }}
+    >
+      {lines.length > 0 ? lines.join('\n') : '(no output)'}
     </div>
   )
+}
+
+/**
+ * The sync in flight and the last one's result, held at MODULE scope with a listener set rather than
+ * in component state.
+ *
+ * Opening Steam's dropdown tears down and rebuilds the Quick Access panel content, so anything held
+ * in a component's state is destroyed by the very act of picking a target — measured on hardware:
+ * the render immediately after a selection reports `games = 0`. Syncs now also start from dialogs,
+ * which outlive the panel content that opened them. A module-level store survives both, and every
+ * mounted panel instance re-renders from it. Same shape as conflicts.tsx's open-conflict store.
+ */
+interface SyncResult {
+  label: string
+  at: string
+  kind: ToastKind
+  summary: string
+  output: string
+}
+
+interface SyncRun {
+  /** The running action's label ("sync all games"), or null when idle. */
+  busy: string | null
+  last: SyncResult | null
+  /** True while a staged update installs — the agent restarts underneath every other action. */
+  installing: boolean
+}
+
+let syncRun: SyncRun = { busy: null, last: null, installing: false }
+const syncListeners = new Set<(s: SyncRun) => void>()
+
+function setSyncRun(patch: Partial<SyncRun>): void {
+  syncRun = { ...syncRun, ...patch }
+  for (const l of syncListeners) l(syncRun)
+}
+
+function useSyncRun(): SyncRun {
+  const [state, setState] = useState(syncRun)
+  useEffect(() => {
+    syncListeners.add(setState)
+    setState(syncRun)
+    return () => { syncListeners.delete(setState) }
+  }, [])
+  return state
+}
+
+/** The sync target (a game name, or null for all games) — module scope for the same remount reason. */
+const ALL_GAMES = '__all_games__'
+let stickyTarget: string | null = null
+
+function problemText(reason: string): string {
+  return reason === 'no-agent' ? 'SaveLocker is not installed on this device.'
+    : reason === 'timeout' ? 'The sync did not finish within 10 minutes.'
+      : `Could not run it (${reason}).`
+}
+
+/**
+ * Push, pull, or both, for one game or all of them.
+ *
+ * The plain actions cannot lose data — the agent refuses a pull while the game is running, refuses
+ * one that would overwrite un-pushed local changes, and turns a diverged push into a conflict rather
+ * than overwriting the server. `force` defeats the middle two and is only ever reached through
+ * `confirmForce`'s dialog, which names the game and says what is lost.
+ *
+ * "sync" is pull then push, back to back. Both legs are independently safe, so a refused pull does
+ * not stop the push: they're reported together, not gated on each other.
+ *
+ * Exit codes lie — the CLI exits 0 for up-to-date, refused and blocked alike — so the toast and the
+ * result row are classified from the agent's own words (`classifySyncOutput`). `force` skips the
+ * agent's hash diff and always writes, so the up-to-date distinction only applies to a plain run.
+ */
+async function runSyncAction(action: 'sync' | 'push' | 'pull', target: string | null, force: boolean, onStarted: () => void) {
+  if (syncRun.busy) return
+  const targetName = target ?? 'all games'
+  const label = `${force ? 'force ' : ''}${action} ${targetName}`
+  setSyncRun({ busy: label })
+  onStarted()
+  const finish = (kind: ToastKind, summary: string, output: string, toastBody: string) => {
+    setSyncRun({ last: { label, at: new Date().toISOString(), kind, summary, output } })
+    saveLockerToast(kind, toastBody)
+  }
+  try {
+    if (action === 'sync') {
+      const pull = await runSync('pull', target, false)
+      onStarted() // the push leg starts its own activity phase, worth its own poke
+      const push = await runSync('push', target, false)
+      if (!pull.ok && !push.ok) {
+        finish('error', problemText(pull.reason), problemText(pull.reason), `Could not ${label}`)
+        return
+      }
+      const output = [
+        pull.ok ? `pull: exit ${pull.data.exitCode}` : `pull: could not run (${pull.reason})`,
+        pull.ok ? pull.data.output : '',
+        push.ok ? `push: exit ${push.data.exitCode}` : `push: could not run (${push.reason})`,
+        push.ok ? push.data.output : '',
+      ].filter((l) => l.trim() !== '').join('\n')
+      // "Changed" wins over "up to date" if either leg did real work — one leg doing something is
+      // the more useful headline than the other leg having nothing to do.
+      const pullOutcome = pull.ok ? classifySyncOutput('pull', pull.data.output) : 'blocked'
+      const pushOutcome = push.ok ? classifySyncOutput('push', push.data.output) : 'blocked'
+      if (pullOutcome === 'blocked' || pushOutcome === 'blocked') {
+        finish('blocked', 'Finished with issues', output, `${label} finished with issues — see Last sync`)
+      } else if (pullOutcome === 'up-to-date' && pushOutcome === 'up-to-date') {
+        finish('info', 'Already up to date', output, `${targetName} is already up to date`)
+      } else {
+        finish('success', 'Synced', output, `${label} finished`)
+      }
+      return
+    }
+
+    const r = await runSync(action, target, force)
+    if (!r.ok) {
+      finish('error', problemText(r.reason), problemText(r.reason), `Could not ${label}`)
+      return
+    }
+    const outcome = force ? null : classifySyncOutput(action, r.data.output)
+    if (outcome === 'blocked') finish('blocked', 'Blocked', r.data.output, `${label} was blocked — see Last sync`)
+    else if (outcome === 'up-to-date') finish('info', 'Already up to date', r.data.output, `${targetName} is already up to date`)
+    else finish('success', r.data.exitCode === 0 ? 'Done' : `Exited ${r.data.exitCode}`, r.data.output, `${label} finished`)
+  } finally {
+    setSyncRun({ busy: null })
+  }
+}
+
+function confirmForce(action: 'push' | 'pull', target: string | null, onStarted: () => void) {
+  const targetName = target ?? 'all games'
+  const consequence = action === 'push'
+    ? `This replaces the server's copy for ${targetName} with this device's save. Every other machine will pull it.`
+    : `This discards this device's save for ${targetName} and takes the server's copy. Unsynced progress here is lost.`
+  showModal(
+    <ConfirmModal
+      bDestructiveWarning
+      strTitle={`Force ${action} ${targetName}?`}
+      strDescription={consequence}
+      strOKButtonText={`Force ${action}`}
+      onOK={() => void runSyncAction(action, target, true, onStarted)}
+    />,
+  )
+}
+
+/** "Advanced" — the one-direction and force actions, one press below the panel's single Sync now. */
+function SyncOptionsModal({ target, onStarted, closeModal }: {
+  target: string | null
+  onStarted: () => void
+  closeModal?: () => void
+}) {
+  const run = (action: 'sync' | 'push' | 'pull') => {
+    closeModal?.()
+    void runSyncAction(action, target, false, onStarted)
+  }
+  // Close first, then open the confirmation: two stacked modals leave the first one's focus
+  // handling and backdrop in the way (same reason conflicts.tsx closes before resolving).
+  const force = (action: 'push' | 'pull') => {
+    closeModal?.()
+    confirmForce(action, target, onStarted)
+  }
+  const half = { flex: 1, minWidth: 0 } as const
   return (
-    <PanelSection title="Status">
-      <PanelSectionRow>
-        <ReadOnlyRow>
-          {line('Server', state.connected ? state.machineName : 'not connected')}
-          {line('Last sync', state.lastSyncAgo)}
-          {line('Games', String(state.gamesTracked))}
-          {line('Saves pushed', String(state.savesBacked))}
-          {/* Staged and available are not the same thing and must not read the same. "ready" is
-              only true of a payload that is already here and verified — the one the Update section
-              below can install on the spot. */}
-          {version?.stagedVersion
-            ? line('Agent', `${version.currentVersion} → ${version.stagedVersion} ready`)
-            : version?.updateAvailable
-              ? line('Agent', `${version.currentVersion} → ${version.latestVersion} available`)
-              : line('Agent', state.currentVersion)}
-        </ReadOnlyRow>
-      </PanelSectionRow>
-    </PanelSection>
+    <QamDialog title="Sync options" sub={target ?? 'All games'} closeModal={closeModal}>
+      <Focusable style={{ display: 'flex', flexDirection: 'column', gap: '10px' }} flow-children="down">
+        <DialogButton onClick={() => run('sync')}>Sync now (pull, then push)</DialogButton>
+        <Focusable style={{ display: 'flex', gap: '10px' }} flow-children="right">
+          <DialogButton style={half} onClick={() => run('push')}>Push only</DialogButton>
+          <DialogButton style={half} onClick={() => run('pull')}>Pull only</DialogButton>
+        </Focusable>
+        <div style={{ fontSize: '12px', opacity: 0.6, marginTop: '6px', textTransform: 'uppercase', letterSpacing: '0.5px' }}>
+          Force — replaces one side completely
+        </div>
+        <Focusable style={{ display: 'flex', gap: '10px' }} flow-children="right">
+          <DialogButton style={half} onClick={() => force('push')}>Force push…</DialogButton>
+          <DialogButton style={half} onClick={() => force('pull')}>Force pull…</DialogButton>
+        </Focusable>
+        <DialogButton style={{ marginTop: '6px' }} onClick={closeModal}>Close</DialogButton>
+      </Focusable>
+    </QamDialog>
+  )
+}
+
+/** The last sync's verbatim output: a refusal explains itself ("X is running — pull refused"), and
+ * paraphrasing that would lose the reason. */
+function LastSyncModal({ result, closeModal }: { result: SyncResult; closeModal?: () => void }) {
+  return (
+    <QamDialog title="Last sync" sub={`${result.label} · ${timeAgo(result.at)} · ${result.summary}`} closeModal={closeModal}>
+      <AgentOutput text={result.output} />
+      <DialogButton onClick={closeModal}>Close</DialogButton>
+    </QamDialog>
+  )
+}
+
+/** "Your other machine has this game checked out." Dismiss clears the notice, not the condition —
+ * if the lease is still held the agent records it again. That is right: the warning exists to be
+ * seen before launching. */
+function LeaseModal({ gameName, holder, onDismiss, closeModal }: {
+  gameName: string
+  holder: string
+  onDismiss: () => void
+  closeModal?: () => void
+}) {
+  return (
+    <QamDialog
+      title={`Checked out elsewhere — ${gameName}`}
+      sub={`Open on ${holder}. Playing here may cause a conflict. Dismissing only hides the notice — if the lease is still held, SaveLocker records it again.`}
+      closeModal={closeModal}
+    >
+      <Focusable style={{ display: 'flex', gap: '10px' }} flow-children="right">
+        <DialogButton style={{ flex: 1 }} onClick={() => { closeModal?.(); onDismiss() }}>Dismiss notice</DialogButton>
+        <DialogButton style={{ flex: 1 }} onClick={closeModal}>Close</DialogButton>
+      </Focusable>
+    </QamDialog>
+  )
+}
+
+/**
+ * `savelocker doctor`, for the one state where the panel itself cannot help: the agent is not
+ * answering. Runs once on open (that is what the row promises) and again only on request — it makes
+ * network calls and takes seconds.
+ */
+function DoctorModal({ closeModal }: { closeModal?: () => void }) {
+  const [busy, setBusy] = useState(false)
+  const [result, setResult] = useState<DoctorResult | null>(null)
+  const [problem, setProblem] = useState<string | null>(null)
+
+  const run = async () => {
+    setBusy(true)
+    setProblem(null)
+    try {
+      const r = await runDoctor()
+      if (r.ok) setResult(r.data)
+      else { setResult(null); setProblem(r.reason) }
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  useEffect(() => { void run() }, [])
+
+  return (
+    <QamDialog
+      title="Check this device"
+      sub="SaveLocker's doctor looks at what the plugin cannot reach and says what is wrong."
+      closeModal={closeModal}
+    >
+      {busy && <div style={{ fontSize: '13px', opacity: 0.75, marginBottom: '16px' }}>Running doctor…</div>}
+      {!busy && problem && (
+        <div style={{ fontSize: '13px', opacity: 0.75, marginBottom: '16px' }}>
+          {problem === 'no-agent' ? 'SaveLocker is not installed on this device. Run install.sh from Desktop mode.'
+            : problem === 'timeout' ? 'doctor did not finish within 60 seconds.'
+              : `Could not run doctor (${problem}).`}
+        </div>
+      )}
+      {!busy && result && <AgentOutput text={result.output} />}
+      <Focusable style={{ display: 'flex', gap: '10px' }} flow-children="right">
+        <DialogButton style={{ flex: 1 }} disabled={busy} onClick={() => void run()}>Run again</DialogButton>
+        <DialogButton style={{ flex: 1 }} onClick={closeModal}>Close</DialogButton>
+      </Focusable>
+    </QamDialog>
   )
 }
 
 /**
  * "Install update now" — the only thing on a Deck that can take a waiting update without a terminal.
+ * Only ever offered for `stagedVersion`: a merely-available update needs a network round trip that
+ * can fail, while this one is a file copy the agent has already verified.
  *
- * Without this, a staged update says it will be installed "the next time this device starts
- * SaveLocker" and offers nothing. That phrase means the `savelocker.service` systemd `--user` unit
- * starting, which nothing on screen says, so the routes to it are a reboot or a terminal — neither
- * of which is where the notice is being read.
- *
- * **Only ever offered for `stagedVersion`.** A merely-available update needs a network round trip
- * that can fail; this one is a file copy the agent has already verified, so pressing the button is
- * the last step rather than the first.
- *
- * The wait itself — restart, then poll until the staged marker is gone rather than trusting any
- * version string — lives in `stagedUpdate.tsx`, shared with the full-screen page's Status section
- * so the two surfaces cannot disagree about what success looks like. The button destroys the API
- * this panel is talking to, which is not a hazard to work around — it is how the update installs —
- * so `unreachable` during the wait is the expected shape of SUCCESS, and anything that
- * error-toasts on the first failed call reports a working update as a failure.
+ * The wait itself lives in `stagedUpdate.tsx`, shared with the full-screen page so the two surfaces
+ * cannot disagree about what success looks like. The result is a toast because success REMOVES the
+ * row it was started from (the staged marker is gone the moment the swap lands).
  */
-function StagedUpdate({ version, onSettled }: {
+function confirmInstall(version: AgentVersion, onSettled: () => void) {
+  const staged = version.stagedVersion
+  if (!staged) return
+  showModal(
+    <ConfirmModal
+      strTitle={`Install v${staged} now?`}
+      strDescription="It is already downloaded and verified. Installing restarts the agent — it takes a few seconds and no game is affected."
+      strOKButtonText="Install now"
+      strCancelButtonText="Later"
+      onOK={() => {
+        void (async () => {
+          setSyncRun({ installing: true })
+          try {
+            const outcome = await installStagedUpdate(version.currentVersion)
+            saveLockerToast(outcome.ok ? 'success' : 'error', outcome.text)
+          } finally {
+            setSyncRun({ installing: false })
+            onSettled()
+          }
+        })()
+      }}
+    />,
+  )
+}
+
+type Reach = { kind: 'loading' } | { kind: 'ok' } | { kind: 'down'; reason: string }
+
+/**
+ * The hero: the one always-on answer to "is SaveLocker working", above everything else.
+ *
+ * Exactly one state wins, in order: not reachable, syncing (the agent's own activity feed, or this
+ * panel's own run before the agent reports it), not connected to the server, nothing tracked, fine.
+ * One focusable block, same reason the old Status block was one: the QAM scrolls by moving focus,
+ * and a non-focusable block at the top is a hole the D-pad cannot land in.
+ */
+function Hero({ reach, state, version, activity, busy }: {
+  reach: Reach
+  state: AgentState | null
   version: AgentVersion | null
-  onSettled: () => void
+  activity: ActivityDto | null
+  busy: string | null
 }) {
-  const [busy, setBusy] = useState(false)
-  const [outcome, setOutcome] = useState<{ ok: boolean; text: string } | null>(null)
-
-  const staged = version?.stagedVersion ?? null
-  const blocked = version?.stagedBlockedReason ?? null
-
-  // Success REMOVES the thing this section is about: the staged marker is gone the moment the swap
-  // lands, so `staged` goes null and this would unmount with the result unread. The outcome keeps
-  // the section on screen by itself — a press that ends with a row quietly disappearing is
-  // indistinguishable from a press that did nothing.
-  if (!staged && !outcome) return null
-
-  const install = async () => {
-    const before = version?.currentVersion ?? ''
-    setBusy(true)
-    setOutcome(null)
-    try {
-      setOutcome(await installStagedUpdate(before))
-    } finally {
-      setBusy(false)
-      onSettled()
-    }
-  }
-
-  return (
-    <PanelSection title="Update">
-      {staged && (
-        <PanelSectionRow>
-          <ReadOnlyRow>
-            <div style={{ fontSize: '0.85em' }}>
-              <b>v{staged}</b> is downloaded and verified.
-            </div>
-            <div style={{ opacity: 0.75, fontSize: '0.8em' }}>
-              {blocked ?? 'Installing takes a few seconds and restarts the agent. No game is affected.'}
-            </div>
-          </ReadOnlyRow>
-        </PanelSectionRow>
-      )}
-
-      {/* Blocked is shown instead of the button, not beside it. Restarting while a game is running
-          is harmless and does NOTHING — the agent defers the swap on purpose — and a button whose
-          success case is "nothing happened" is worse than no button. The 30 s status poll brings it
-          back on its own once the game closes. */}
-      {staged && !blocked && (
-        <PanelSectionRow>
-          <ButtonItem layout="below" disabled={busy} onClick={() => void install()}>
-            {busy ? 'Installing…' : `Install v${staged} now`}
-          </ButtonItem>
-        </PanelSectionRow>
-      )}
-
-      {outcome && (
-        <PanelSectionRow>
-          <ReadOnlyRow>
-            <span style={{ fontSize: '0.8em', opacity: outcome.ok ? 0.8 : 1 }}>{outcome.text}</span>
-          </ReadOnlyRow>
-        </PanelSectionRow>
-      )}
-    </PanelSection>
-  )
-}
-
-/**
- * Push and pull, for one game or all of them.
- *
- * The plain buttons cannot lose data — the agent refuses a pull while the game is running, refuses
- * one that would overwrite un-pushed local changes, and turns a diverged push into a conflict rather
- * than overwriting the server. `--force` defeats the middle two, and is the only way to lose
- * progress from this panel, so it goes through a confirmation that names the game and says what is
- * lost. Deliberately not a toggle: a toggle left on makes the NEXT press destructive too.
- */
-const ALL_GAMES = '__all_games__'
-
-/**
- * The sync target, held at MODULE scope rather than in component state.
- *
- * Opening Steam's dropdown tears down and rebuilds the Quick Access panel content, so a selection
- * made in it is destroyed by the very act of making it — the component remounts and every useState
- * goes back to its initial value. Measured on hardware: the render immediately after a selection
- * reports `games = 0`, i.e. the parent's state reset too, not just this component's.
- *
- * Module scope outlives that remount. It resets if the plugin itself is reloaded, which is correct:
- * this is a transient UI choice, not a setting worth persisting.
- */
-let stickyTarget: string | null = null
-
-function Sync({ games, onActionStarted }: { games: TrackedGame[]; onActionStarted: () => void }) {
-  const [target, setTargetState] = useState<string | null>(stickyTarget) // null = all games
-  const setTarget = (value: string | null) => { stickyTarget = value; setTargetState(value) }
-  const [busy, setBusy] = useState<string | null>(null)
-  const [result, setResult] = useState<{ label: string; exitCode: number; output: string } | null>(null)
-  const [problem, setProblem] = useState<string | null>(null)
-
-  const targetName = target ?? 'all games'
-
-  const go = async (action: 'push' | 'pull', force: boolean) => {
-    const label = `${force ? 'force ' : ''}${action} ${targetName}`
-    setBusy(label)
-    setProblem(null)
-    onActionStarted()
-    try {
-      const r = await runSync(action, target, force)
-      if (r.ok) {
-        setResult({ label, exitCode: r.data.exitCode, output: r.data.output })
-        // A manual sync is worth announcing even though the result is listed below: it can take a
-        // while, and the user may have closed the panel or started a game before it finishes.
-        //
-        // `exitCode === 0` is not "it worked" here — the CLI exits 0 for a refusal too (see
-        // `classifySyncOutput`'s doc comment in gamingSync.tsx), and the agent's own hash diff means
-        // a clean exit often means nothing needed to change at all. `force` bypasses that diff
-        // entirely (always writes), so the up-to-date distinction only applies to a plain sync.
-        const outcome = force ? null : classifySyncOutput(action, r.data.output)
-        const body = outcome === 'up-to-date' ? `${targetName} is already up to date`
-          : outcome === 'blocked' ? `${label} was blocked — see the plugin`
-            : `${label} finished`
-        toaster.toast({ title: 'SaveLocker', body })
-      } else {
-        setResult(null)
-        setProblem(r.reason)
-      }
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  // Pull then push, back to back — a plain "sync it" for someone who doesn't want to think about
-  // which direction they need. Both legs are independently safe (neither can lose data without
-  // `--force`), so a refused/failed pull does not stop the push attempt: they're reported together,
-  // not gated on each other.
-  const syncBoth = async () => {
-    const label = `sync ${targetName}`
-    setBusy(label)
-    setProblem(null)
-    onActionStarted()
-    try {
-      const pull = await runSync('pull', target, false)
-      onActionStarted() // the push leg starts its own, separate activity phase, worth its own poke
-      const push = await runSync('push', target, false)
-      if (!pull.ok && !push.ok) {
-        setResult(null)
-        setProblem(pull.reason)
-        return
-      }
-      const lines = [
-        pull.ok ? `pull: exit ${pull.data.exitCode}` : `pull: could not run (${pull.reason})`,
-        pull.ok ? pull.data.output : '',
-        push.ok ? `push: exit ${push.data.exitCode}` : `push: could not run (${push.reason})`,
-        push.ok ? push.data.output : '',
-      ].filter((l) => l.trim() !== '')
-      const exitCode = (pull.ok ? pull.data.exitCode : 1) || (push.ok ? push.data.exitCode : 1)
-      setResult({ label, exitCode, output: lines.join('\n') })
-      // Same reasoning as `go()` above: exit code doesn't distinguish "blocked" from "nothing to do"
-      // from "actually synced", so this reads the agent's own words instead. "Changed" wins over
-      // "up to date" if either leg's classification says so — one leg doing real work is the more
-      // useful headline than the other leg (or a multi-game batch) having nothing to do.
-      const pullOutcome = pull.ok ? classifySyncOutput('pull', pull.data.output) : 'blocked'
-      const pushOutcome = push.ok ? classifySyncOutput('push', push.data.output) : 'blocked'
-      const body = pullOutcome === 'blocked' || pushOutcome === 'blocked'
-        ? `${label} finished with issues — see the plugin`
-        : pullOutcome === 'up-to-date' && pushOutcome === 'up-to-date'
-          ? `${targetName} is already up to date`
-          : `${label} finished`
-      toaster.toast({ title: 'SaveLocker', body })
-    } finally {
-      setBusy(null)
-    }
-  }
-
-  const confirmForce = (action: 'push' | 'pull') => {
-    const consequence = action === 'push'
-      ? `This replaces the server's copy for ${targetName} with this device's save. Every other machine will pull it.`
-      : `This discards this device's save for ${targetName} and takes the server's copy. Unsynced progress here is lost.`
-    showModal(
-      <ConfirmModal
-        bDestructiveWarning
-        strTitle={`Force ${action} ${targetName}?`}
-        strDescription={consequence}
-        strOKButtonText={`Force ${action}`}
-        onOK={() => void go(action, true)}
-      />,
-    )
-  }
-
-  return (
-    <PanelSection title="Sync">
-      <PanelSectionRow>
-        <DropdownItem
-          label="Target"
-          rgOptions={[
-            { data: ALL_GAMES, label: 'All games' },
-            ...games.map((g) => ({ data: g.name, label: g.name })),
-          ]}
-          selectedOption={target ?? ALL_GAMES}
-          onChange={(o: any) => {
-            // Steam's own Dropdown, resolved out of CommonUIModule by shape — its callback contract
-            // is not ours to assume, so accept either the option object or a bare value.
-            const picked = o && typeof o === 'object' && 'data' in o ? o.data : o
-            setTarget(picked === ALL_GAMES || picked == null ? null : String(picked))
-          }}
-        />
-      </PanelSectionRow>
-
-      {/* Push/Force push share a row, Pull/Force pull share a row, and Sync sits alone between
-          them — the plain action next to its destructive variant, with the one-click bidirectional
-          shortcut set apart rather than buried in the same rank as five other buttons. */}
-      <PanelSectionRow>
-        <Focusable style={{ display: 'flex', gap: '6px' }}>
-          <div style={{ flex: 1 }}>
-            <ButtonItem layout="below" disabled={busy !== null} onClick={() => void go('push', false)}>
-              {busy === `push ${targetName}` ? 'Pushing…' : 'Push'}
-            </ButtonItem>
-          </div>
-          <div style={{ flex: 1 }}>
-            <ButtonItem layout="below" disabled={busy !== null} onClick={() => confirmForce('push')}>
-              Force push…
-            </ButtonItem>
-          </div>
-        </Focusable>
-      </PanelSectionRow>
-      <PanelSectionRow>
-        <ButtonItem layout="below" disabled={busy !== null} onClick={() => void syncBoth()}>
-          {busy === `sync ${targetName}` ? 'Syncing…' : `Sync ${targetName}`}
-        </ButtonItem>
-      </PanelSectionRow>
-      <PanelSectionRow>
-        <Focusable style={{ display: 'flex', gap: '6px' }}>
-          <div style={{ flex: 1 }}>
-            <ButtonItem layout="below" disabled={busy !== null} onClick={() => void go('pull', false)}>
-              {busy === `pull ${targetName}` ? 'Pulling…' : 'Pull'}
-            </ButtonItem>
-          </div>
-          <div style={{ flex: 1 }}>
-            <ButtonItem layout="below" disabled={busy !== null} onClick={() => confirmForce('pull')}>
-              Force pull…
-            </ButtonItem>
-          </div>
-        </Focusable>
-      </PanelSectionRow>
-
-      {problem && (
-        <PanelSectionRow>
-          <ReadOnlyRow>
-            {problem === 'no-agent' ? 'SaveLocker is not installed on this device.'
-              : problem === 'timeout' ? 'The sync did not finish within 10 minutes.'
-                : `Could not run it (${problem}).`}
-          </ReadOnlyRow>
-        </PanelSectionRow>
-      )}
-
-      {result && (
-        <PanelSectionRow>
-          <Focusable style={{ display: 'flex', flexDirection: 'column' }}>
-            <ReadOnlyRow>
-              <span style={{ fontSize: '0.8em', opacity: 0.8 }}>
-                {result.label} — {result.exitCode === 0 ? 'ok' : `exit ${result.exitCode}`}
-              </span>
-            </ReadOnlyRow>
-            {/* The agent's own words, not a summary of them: a refusal explains itself ("X is
-                running — pull refused"), and paraphrasing that would lose the reason. */}
-            {result.output.split('\n').filter((l) => l.trim() !== '').slice(-12).map((l, i) => (
-              <ReadOnlyRow key={i}>
-                <span style={{ fontSize: '0.72em', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{l}</span>
-              </ReadOnlyRow>
-            ))}
-          </Focusable>
-        </PanelSectionRow>
-      )}
-    </PanelSection>
-  )
-}
-
-/**
- * What the agent is doing right now, right under Status — the "is something happening" answer.
- * Hidden entirely at Idle: an empty bar is worse than no bar, since it invites checking whether it's
- * stuck. The full history (ActivityLog) lives on the full-screen page now, not here.
- */
-function Progress({ activity }: { activity: ActivityDto | null }) {
   const current = activity?.current
-  if (!current || current.phase === 'Idle') return null
+  const active = current && current.phase !== 'Idle' ? current : null
+  // Byte progress only exists for a push (the agent reports it on the upload chunk loop) — pulling
+  // and the post-game settle wait get an indeterminate bar rather than a fabricated percent.
+  const pct = active && active.phase === 'Pushing' && active.bytesTotal > 0
+    ? Math.min(100, Math.round((active.bytesDone / active.bytesTotal) * 100))
+    : null
 
-  // Byte progress only ever exists for a push (the agent only reports it on the upload chunk loop) —
-  // pulling and the post-game settle wait get an indeterminate bar rather than a fabricated percent.
-  const pct = current.phase === 'Pushing' && current.bytesTotal > 0
-    ? Math.min(100, Math.round((current.bytesDone / current.bytesTotal) * 100))
+  let kind: ToastKind
+  let headline: string
+  let sub: string
+  let bar = false
+  if (reach.kind === 'loading') {
+    kind = 'info'; headline = 'Checking SaveLocker…'; sub = 'Asking the agent on this device.'
+  } else if (reach.kind === 'down' || !state) {
+    kind = 'error'
+    headline = 'SaveLocker is not responding'
+    sub = reach.kind === 'down' && reach.reason === 'no-agent'
+      ? 'SaveLocker is not installed on this device.'
+      : 'The agent on this device is not reachable.'
+  } else if (active || busy) {
+    kind = 'syncing'
+    bar = true
+    headline = active ? `Syncing ${active.gameName ?? 'a game'}` : `Running ${busy}`
+    sub = active ? `${active.phase.toLowerCase()}${pct !== null ? ` · ${pct}%` : ''}` : 'Starting…'
+  } else if (!state.connected) {
+    kind = 'blocked'
+    headline = 'Not connected to the server'
+    sub = `${state.gamesTracked} games · last sync ${state.lastSyncAgo}`
+  } else if (state.gamesTracked === 0) {
+    kind = 'info'
+    headline = 'No games tracked yet'
+    sub = 'Track games in the SaveLocker dashboard and they appear here.'
+  } else {
+    kind = 'success'
+    headline = 'SaveLocker is running'
+    sub = `${state.machineName} · ${state.gamesTracked} games · synced ${state.lastSyncAgo}`
+  }
+
+  // Available is not staged, and is not actionable from here (see AgentVersion's doc comment), so
+  // it is a line in the hero rather than an attention row with nothing behind it.
+  const available = reach.kind === 'ok' && version?.updateAvailable && !version.stagedVersion
+    ? `Agent ${version.currentVersion} → ${version.latestVersion} available`
     : null
 
   return (
-    <PanelSection title="Syncing">
+    <PanelSection>
       <PanelSectionRow>
-        <ReadOnlyRow>
-          <div style={{ fontSize: '0.85em', marginBottom: '4px' }}>
-            {(current.gameName ?? 'a game') + ' — ' + current.phase.toLowerCase()}
-            {pct !== null && ` (${pct}%)`}
+        <Field focusable bottomSeparator="none" childrenLayout="below" childrenContainerWidth="max">
+          <div style={{ background: '#23262e', borderRadius: '2px', padding: '12px 14px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '9px' }}>
+              <Dot kind={kind} />
+              <div style={{ flex: 1, fontSize: '16px', lineHeight: '21px', fontWeight: 700, color: '#fff' }}>{headline}</div>
+            </div>
+            <div style={{ fontSize: '12px', lineHeight: '16px', color: 'rgba(255,255,255,0.6)', marginTop: '3px' }}>{sub}</div>
+            {available && (
+              <div style={{ fontSize: '12px', lineHeight: '16px', color: 'rgba(255,255,255,0.6)', marginTop: '2px' }}>{available}</div>
+            )}
+            {bar && (
+              <div style={{ marginTop: '9px', height: '4px', borderRadius: '2px', background: 'rgba(255,255,255,0.15)', overflow: 'hidden' }}>
+                <div style={{
+                  height: '100%', borderRadius: '2px', background: '#1a9fff',
+                  width: pct !== null ? `${pct}%` : '35%', opacity: pct !== null ? 1 : 0.7,
+                }}
+                />
+              </div>
+            )}
           </div>
-          <div style={{ background: 'rgba(255,255,255,0.15)', borderRadius: '3px', height: '5px', overflow: 'hidden' }}>
-            <div style={{
-              background: 'rgba(255,255,255,0.6)',
-              height: '100%',
-              width: pct !== null ? `${pct}%` : '35%',
-              opacity: pct !== null ? 1 : 0.7,
-            }} />
-          </div>
-        </ReadOnlyRow>
+        </Field>
       </PanelSectionRow>
     </PanelSection>
   )
@@ -489,19 +513,26 @@ function Progress({ activity }: { activity: ActivityDto | null }) {
 
 function Content() {
   const [state, setState] = useState<AgentState | null>(null)
+  const [reach, setReach] = useState<Reach>({ kind: 'loading' })
   const [version, setVersion] = useState<AgentVersion | null>(null)
   const [games, setGames] = useState<TrackedGame[]>([])
   const [activity, setActivity] = useState<ActivityDto | null>(null)
+  const [target, setTargetState] = useState<string | null>(stickyTarget) // null = all games
+  const setTarget = (value: string | null) => { stickyTarget = value; setTargetState(value) }
   // Which warnings have already been toasted, so a standing warning is announced once rather than
   // every refresh. A panel that toasts the same thing every minute gets uninstalled.
   const [toasted, setToasted] = useState<Set<string>>(new Set())
+  const run = useSyncRun()
+  const conflicts = useOpenConflicts()
+  const { holds, refresh: refreshHolds } = useDlcHolds()
 
   const refreshStatus = async () => {
     const [s, v, g] = await Promise.all([fetchState(), fetchVersion(), fetchGames()])
     if (v.ok) setVersion(v.data)
     if (g.ok) setGames(g.data)
-    if (!s.ok) { setState(null); return }
+    if (!s.ok) { setState(null); setReach({ kind: 'down', reason: s.reason }); return }
     setState(s.data)
+    setReach({ kind: 'ok' })
 
     const fresh = s.data.leaseWarnings.filter((w) => !toasted.has(w.gameName))
     if (fresh.length > 0) {
@@ -520,11 +551,10 @@ function Content() {
     if (a.ok) setActivity(a.data)
   }
 
-  // The 2s interval below is fine for a sync already in flight, but a press-and-wait for the next
-  // tick means a short pull/push can finish before the bar ever shows up at all. Poll right away
-  // when something is KNOWN to have just started, plus once more shortly after — the agent's own
-  // SyncActivityTracker.Begin() call happens a beat after the CLI process spawns, not the instant
-  // this plugin's subprocess call returns, so a single immediate poll can still land just before it.
+  // The adaptive poll below can be 10 s away when a press starts a sync, and a short pull/push can
+  // finish before the hero ever shows it. Poll right away when something is KNOWN to have just
+  // started, plus once more shortly after — the agent's SyncActivityTracker.Begin() lands a beat
+  // after the CLI process spawns, so a single immediate poll can still arrive just before it.
   const pokeActivity = () => {
     void refreshActivity()
     setTimeout(() => void refreshActivity(), 400)
@@ -551,10 +581,10 @@ function Content() {
 
   useEffect(() => {
     // The automatic pass NEVER writes — it is a slow safety net, and idempotence on the agent side
-    // is what makes re-running it free. Nothing in the QAM shows its result any more (LaunchOptions,
-    // on the full-screen page, is the interactive surface for that now) so the outcome is discarded
-    // here; `report()` inside applyAll is what makes doctor able to answer for a game regardless of
-    // whether this fire-and-forget call is ever looked at.
+    // is what makes re-running it free. Nothing in the QAM shows its result (the full-screen
+    // page's Launch options is the interactive surface for that), so the outcome is discarded here;
+    // `report()` inside applyAll is what lets doctor answer for a game whether or not this
+    // fire-and-forget call is ever looked at.
     void applyAll(false)
     void refreshStatus()
     const timer = setInterval(() => void applyAll(false), 5 * 60 * 1000)
@@ -563,11 +593,10 @@ function Content() {
     const statusTimer = setInterval(() => void refreshStatus(), 30 * 1000)
 
     // Adaptive, not a flat setInterval: Decky keeps a QAM plugin's content mounted for as long as
-    // the plugin is loaded, not just while the panel is open, so this effect runs continuously for
-    // the whole time Steam is up — including through an entire play session. 2s only matters while
-    // something is actually mid-sync, to keep the progress bar live; the rest of the time (the large
-    // majority of it) this only needs to notice a Gaming-Mode-triggered sync starting, so it backs
-    // off to a much slower poll instead of spending a request every 2s indefinitely for nothing.
+    // the plugin is loaded, not just while the panel is open, so this effect runs for the whole
+    // time Steam is up — including an entire play session. 2 s only matters while something is
+    // mid-sync, to keep the hero's bar live; the rest of the time this only needs to notice a
+    // Gaming-Mode-triggered sync starting, so it backs off rather than polling every 2 s forever.
     let activityTimeout: ReturnType<typeof setTimeout>
     let cancelled = false
     const scheduleActivity = async () => {
@@ -587,23 +616,138 @@ function Content() {
     }
   }, [])
 
-  const conflicts = useOpenConflicts()
+  const nameFor = (gameId: string) => games.find((g) => g.gameId === gameId)?.name ?? 'A tracked game'
+  const warnings = state?.leaseWarnings ?? []
+  const staged = version?.stagedVersion ?? null
+  const stagedBlocked = version?.stagedBlockedReason ?? null
+  const down = reach.kind === 'down'
+  const targetName = target ?? 'all games'
+  // A sync needs a reachable agent and something to sync; an install restarts the agent under it.
+  const syncDisabled = run.busy !== null || run.installing || down || reach.kind === 'loading'
+    || (state !== null && state.gamesTracked === 0)
+
+  const attention = conflicts.length + warnings.length + holds.length + (staged ? 1 : 0) + (down ? 1 : 0)
 
   return (
     <>
-    <ConflictWarnings conflicts={conflicts} games={games} onOpen={openConflictResolveModal} />
-    <LeaseWarnings warnings={state?.leaseWarnings ?? []} onDismiss={(g) => void dismiss(g)} />
-    <DlcHolds />
-    <Status state={state} version={version} />
-    <Progress activity={activity} />
-    <StagedUpdate version={version} onSettled={() => void refreshStatus()} />
-    <Sync games={games} onActionStarted={pokeActivity} />
-    <GamingSyncSettings />
-    <PanelSection title="More">
-      <PanelSectionRow>
-        <ButtonItem layout="below" onClick={openSettings}>Settings</ButtonItem>
-      </PanelSectionRow>
-    </PanelSection>
+      <Hero reach={reach} state={state} version={version} activity={activity} busy={run.busy} />
+
+      {/* Only exists when something does. Each item is ONE focus stop whose press opens its own
+          flow — the old panel gave every item a read-only row plus a button row, and listed the
+          rows of all items before any of their buttons. */}
+      {attention > 0 && (
+        <PanelSection title="Needs attention">
+          {down && (
+            <NavRow
+              dot="error"
+              label="SaveLocker agent not reachable"
+              description="Run a check to see what is wrong."
+              onOpen={() => showModal(<DoctorModal />)}
+            />
+          )}
+          {conflicts.map((c) => (
+            <NavRow
+              key={c.id}
+              dot="conflict"
+              label={`Save conflict — ${nameFor(c.gameId)}`}
+              description={`This Deck and the cloud both changed since the last sync${c.escalated ? ' — unresolved for a while' : ''}. Pick which save to keep.`}
+              onOpen={() => openConflictResolveModal(c.id)}
+            />
+          ))}
+          {warnings.map((w) => (
+            <NavRow
+              key={`lease-${w.gameName}`}
+              dot="warning"
+              label={`Checked out elsewhere — ${w.gameName}`}
+              description={`Open on ${w.holderMachine}. Playing here may cause a conflict.`}
+              onOpen={() => showModal(
+                <LeaseModal gameName={w.gameName} holder={w.holderMachine} onDismiss={() => void dismiss(w.gameName)} />,
+              )}
+            />
+          ))}
+          {holds.map((h) => (
+            <NavRow
+              key={`dlc-${h.gameId}`}
+              dot="warning"
+              label={`Waiting for DLC — ${h.gameName}`}
+              description={`The newer save needs ${h.summary}. The pull is held.`}
+              onOpen={() => openDlcHoldModal(h, () => { void refreshHolds(); void refreshStatus() })}
+            />
+          ))}
+          {/* Blocked keeps the row but drops the chevron: restarting while a game runs is harmless
+              and does NOTHING (the agent defers the swap on purpose), and a dialog whose success
+              case is "nothing happened" is worse than none. Pressing it says why instead. The 30 s
+              status poll brings the installable row back by itself once the game closes. */}
+          {staged && version && (
+            <NavRow
+              dot="syncing"
+              label={run.installing ? `Installing v${staged}…` : `Update v${staged} ready`}
+              description={run.installing ? 'The agent is restarting. No game is affected.'
+                : stagedBlocked ?? 'Installs in a few seconds and restarts the agent. No game is affected.'}
+              chevron={!stagedBlocked && !run.installing}
+              onOpen={() => {
+                if (run.installing) return
+                if (stagedBlocked) saveLockerToast('blocked', `v${staged} installs later`, stagedBlocked)
+                else confirmInstall(version, () => void refreshStatus())
+              }}
+            />
+          )}
+        </PanelSection>
+      )}
+
+      <PanelSection title="Sync">
+        <PanelSectionRow>
+          <DropdownItem
+            label="Games"
+            disabled={run.busy !== null}
+            rgOptions={[
+              { data: ALL_GAMES, label: 'All games' },
+              ...games.map((g) => ({ data: g.name, label: g.name })),
+            ]}
+            selectedOption={target ?? ALL_GAMES}
+            onChange={(o: any) => {
+              // Steam's own Dropdown, resolved out of CommonUIModule by shape — its callback contract
+              // is not ours to assume, so accept either the option object or a bare value.
+              const picked = o && typeof o === 'object' && 'data' in o ? o.data : o
+              setTarget(picked === ALL_GAMES || picked == null ? null : String(picked))
+            }}
+          />
+        </PanelSectionRow>
+        <PanelSectionRow>
+          <ButtonItem layout="below" disabled={syncDisabled} onClick={() => void runSyncAction('sync', target, false, pokeActivity)}>
+            {run.busy ? 'Syncing…' : target ? `Sync ${targetName}` : 'Sync now'}
+          </ButtonItem>
+        </PanelSectionRow>
+        {run.last && (
+          <NavRow
+            dot={run.last.kind}
+            label={`Last sync · ${timeAgo(run.last.at)}`}
+            description={`${run.last.label} — ${run.last.summary}`}
+            onOpen={() => { if (syncRun.last) showModal(<LastSyncModal result={syncRun.last} />) }}
+          />
+        )}
+        {!down && (
+          <NavRow
+            label="Advanced"
+            description="Push or pull one direction, force actions"
+            onOpen={() => {
+              if (syncDisabled) return
+              showModal(<SyncOptionsModal target={target} onStarted={pokeActivity} />)
+            }}
+          />
+        )}
+      </PanelSection>
+
+      <PanelSection title="More">
+        <PanelSectionRow>
+          <GamingSyncToggle />
+        </PanelSectionRow>
+        <NavRow
+          label="Settings and diagnostics"
+          description="Games, launch options, activity, doctor"
+          onOpen={openSettings}
+        />
+      </PanelSection>
     </>
   )
 }

@@ -870,9 +870,24 @@ function resetFullPageScroll(): void {
   }
 }
 
-export function FullPage() {
-  const [activePage, setActivePage] = useState('status')
+/**
+ * One sub-route per page, under the plugin's own route.
+ *
+ * Steam's PagedSettingsDialog wrapper is route-driven, not state-driven (read out of the client's
+ * own bundle, chunk~2dcc5aaf7.js): it rewrites every page's `identifier` to `link || route`, picks
+ * the active page by matching `route` against the current location, and on a press calls
+ * `history.replace(route)`. A page with no `route` therefore gets `identifier: undefined`, every
+ * press compares `undefined` with `undefined` and returns early — which is exactly how this page
+ * shipped first: the list rendered, and pressing any entry did nothing. The `page` /
+ * `onPageRequested` props @decky/ui still types are not how the current client decides either.
+ *
+ * Decky's route for `/savelocker` is not `exact`, so `/savelocker/games` still renders this
+ * component; the bare route (what the QAM's Settings row navigates to) matches no page and the
+ * dialog falls back to the first one, Status. Decky's own settings page is built the same way.
+ */
+const pageRoute = (page: string) => `${SAVELOCKER_PAGE_ROUTE}/${page}`
 
+export function FullPage() {
   useEffect(() => {
     resetFullPageScroll()
     const raf = requestAnimationFrame(resetFullPageScroll)
@@ -885,20 +900,18 @@ export function FullPage() {
       {/* SidebarNavigation is Steam's own PagedSettingsDialog (see @decky/ui's resolution in
           SidebarNavigation.js): title and page list on the left, the active page's content on the
           right, with Valve's focus/scroll handling. Only the active page's content mounts, so each
-          page's polling starts and stops with it. `page`/`onPageRequested` make it controlled —
-          the same usage Decky's documentation shows for plugin settings pages. */}
+          page's polling starts and stops with it. Navigation between pages is by route — see
+          `pageRoute` above for why it cannot be anything else. */}
       <SidebarNavigation
         title="SaveLocker"
         showTitle
-        page={activePage}
-        onPageRequested={setActivePage}
         pages={[
-          { title: 'Status', content: <StatusPage />, icon: <FaShieldAlt />, identifier: 'status' },
-          { title: 'Games', content: <GamesPage />, icon: <FaGamepad />, identifier: 'games' },
-          { title: 'Launch options', content: <LaunchOptionsPage />, icon: <FaRocket />, identifier: 'launch' },
+          { title: 'Status', content: <StatusPage />, icon: <FaShieldAlt />, route: pageRoute('status') },
+          { title: 'Games', content: <GamesPage />, icon: <FaGamepad />, route: pageRoute('games') },
+          { title: 'Launch options', content: <LaunchOptionsPage />, icon: <FaRocket />, route: pageRoute('launch') },
           'separator',
-          { title: 'Activity', content: <ActivityPage />, icon: <FaHistory />, identifier: 'activity' },
-          { title: 'Diagnostics', content: <DiagnosticsPage />, icon: <FaStethoscope />, identifier: 'diagnostics' },
+          { title: 'Activity', content: <ActivityPage />, icon: <FaHistory />, route: pageRoute('activity') },
+          { title: 'Diagnostics', content: <DiagnosticsPage />, icon: <FaStethoscope />, route: pageRoute('diagnostics') },
         ]}
       />
     </div>

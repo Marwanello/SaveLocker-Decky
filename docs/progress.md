@@ -80,3 +80,40 @@ was left untouched.
 
 Nothing committed. Next: hardware-verify the settings page via the sibling repo pipeline, and decide
 whether/when to implement the QAM panel redesign (mockup only, so far).
+
+---
+
+## 2026-10-15 — QAM redesign implemented, settings page navigation fixed (branch `qam-ui-redesign`)
+
+### 1. Settings page: pressing a page in the side list did nothing
+
+Root cause, read from Steam's own bundle (`steamui/chunk~2dcc5aaf7.js`, the `fnSetNavigateToPage`
+wrapper that `@decky/ui`'s `SidebarNavigation` resolves to): the current client's
+PagedSettingsDialog is **route-driven**. It rewrites each page's `identifier` to `link || route`,
+picks the active page by matching `route` against the location, and on a press calls
+`history.replace(route)`. Pages built with only `identifier` (and the `page`/`onPageRequested`
+props `@decky/ui` still types) all got `identifier: undefined`, so every press compared `undefined`
+with `undefined` and returned early. Fix: every page has `route: /savelocker/<page>`; Decky's
+`/savelocker` route is non-exact, so sub-routes render the same component and the bare route falls
+back to the first page (Status) — the same structure Decky's own settings page uses.
+
+### 2. QAM redesign (mockup.html) implemented in `src/index.tsx`
+
+- **Hero**: one focusable status block — not responding / syncing (agent activity, or this panel's
+  own run before the agent reports it, with the progress bar) / not connected / no games / running.
+  "Agent update available" (not staged) is a hero line, not an actionable row.
+- **Needs attention** (only when non-empty): one row per item, each opening its own flow —
+  conflict → existing resolve modal; lease → dialog with Dismiss notice; DLC hold → dialog with
+  hand-over / pull anyway; staged update → confirm, install, result toast (blocked shows the
+  agent's reason on press instead); agent unreachable → doctor dialog.
+- **Sync**: Games dropdown, Sync now, a "Last sync" row (output in a dialog), Advanced (push only /
+  pull only / force push… / force pull…, force still behind ConfirmModal).
+- **More**: Auto-sync in Gaming Mode toggle (now a bare row, `GamingSyncToggle`), Settings and
+  diagnostics row.
+- The running sync, last result and install flag live in a module-level store (`useSyncRun`), so
+  they survive the QAM remount that opening Steam's dropdown causes and syncs started from dialogs.
+- `dlcHolds.tsx` now exports `useDlcHolds` + `openDlcHoldModal`; the full page keeps `DlcHolds`.
+
+Verified: `npx tsc --noEmit` clean, `npm run build` clean, bundle greps. **Not yet verified on a
+Deck** — next step is `testenv.ps1 build`/`up` with `SAVELOCKER_DECKY_PLUGIN_REPO` pointed here, then
+check page switching in the settings page and every QAM attention flow.

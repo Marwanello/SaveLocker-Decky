@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { PanelSection, PanelSectionRow, ToggleField } from '@decky/ui'
+import { ToggleField } from '@decky/ui'
 import { callable } from '@decky/api'
 import { saveLockerToast } from './toast'
 import { askLaunchQuestion, type LaunchQuestion } from './launchQuestion'
@@ -857,7 +857,9 @@ export function unregisterGamingModeSync(): void {
   cacheRefreshTimer = null
 }
 
-export function GamingSyncSettings() {
+/** The Gaming Mode auto-sync switch as a bare row — the QAM's "More" section places it beside the
+ * Settings row rather than giving one toggle a section of its own. */
+export function GamingSyncToggle() {
   const [enabled, setEnabled] = useState(gamingSyncEnabled)
 
   // `gamingSyncEnabled` is seeded to `true` and only corrected asynchronously by
@@ -872,19 +874,15 @@ export function GamingSyncSettings() {
   }, [])
 
   return (
-    <PanelSection title="Gaming Mode sync">
-      <PanelSectionRow>
-        <ToggleField
-          label="Auto-sync in Gaming Mode"
-          description="Pulls an enrolled game before it starts and pushes after it closes, for games without a working launch-option wrapper."
-          checked={enabled}
-          onChange={(value: boolean) => {
-            setEnabled(value)
-            gamingSyncEnabled = value
-            void persistGamingSyncEnabled(value)
-          }}
-        />
-      </PanelSectionRow>
-    </PanelSection>
+    <ToggleField
+      label="Auto-sync in Gaming Mode"
+      description="Pulls an enrolled game before it starts and pushes after it closes, for games without a working launch-option wrapper."
+      checked={enabled}
+      onChange={(value: boolean) => {
+        setEnabled(value)
+        gamingSyncEnabled = value
+        void persistGamingSyncEnabled(value)
+      }}
+    />
   )
 }
