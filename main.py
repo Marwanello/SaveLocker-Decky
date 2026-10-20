@@ -560,6 +560,22 @@ class Plugin:
         """Restore the latest save without the DLC it was made with. A pull, so the same long timeout as sync()."""
         return await asyncio.to_thread(_request, "/api/games/%s/dlc/pull-anyway" % game_id, {}, timeout=300)
 
+    async def emptied_holds(self):
+        """Games the agent holds because every save file vanished from their folder here (SaveLocker
+        tasks/empty-save-hold), for the QAM's "Needs attention" rows. A small read of a file beside the agent's config."""
+        return await asyncio.to_thread(_request, "/api/holds/emptied")
+
+    async def answer_emptied_hold(self, game_id: str, action: str):
+        """
+        One of the two answers to an emptied-folder hold: `restore-here` (a forced pull of the latest save) or
+        `delete-everywhere` (a forced push of the empty folder, which every other machine then takes). A pull or a
+        push, so the same long timeout as sync().
+        """
+        if action not in ("restore-here", "delete-everywhere"):
+            return {"ok": False, "reason": "bad-action"}
+        return await asyncio.to_thread(
+            _request, "/api/games/%s/emptied-hold" % game_id, {"action": action}, timeout=300)
+
     async def sync_status(self, game_id: str):
         """
         On-demand "am I actually in sync right now" check (Phase 12 of

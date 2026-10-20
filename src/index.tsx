@@ -14,6 +14,7 @@ import {
 } from './conflicts'
 import { FullPage, SAVELOCKER_PAGE_ROUTE } from './fullPage'
 import { openDlcHoldModal, useDlcHolds } from './dlcHolds'
+import { openEmptiedHoldModal, useEmptiedHolds } from './emptiedHolds'
 import { installStagedUpdate } from './stagedUpdate'
 import { KIND_STYLE, saveLockerToast, type ToastKind } from './toast'
 import {
@@ -555,6 +556,7 @@ function Content() {
   const run = useSyncRun()
   const conflicts = useOpenConflicts()
   const { holds, refresh: refreshHolds } = useDlcHolds()
+  const { holds: emptied, refresh: refreshEmptied } = useEmptiedHolds()
   const heroRef = useRef<HTMLDivElement>(null)
   const qamVisible = useQuickAccessVisible()
 
@@ -666,7 +668,7 @@ function Content() {
   const syncDisabled = run.busy !== null || run.installing || down || reach.kind === 'loading'
     || (state !== null && state.gamesTracked === 0)
 
-  const attention = conflicts.length + warnings.length + holds.length + (staged ? 1 : 0) + (down ? 1 : 0)
+  const attention = conflicts.length + emptied.length + warnings.length + holds.length + (staged ? 1 : 0) + (down ? 1 : 0)
 
   return (
     <>
@@ -692,6 +694,15 @@ function Content() {
               label={`Save conflict — ${nameFor(c.gameId)}`}
               description={`This Deck and the cloud both changed since the last sync${c.escalated ? ' — unresolved for a while' : ''}. Pick which save to keep.`}
               onOpen={() => openConflictResolveModal(c.id)}
+            />
+          ))}
+          {emptied.map((h) => (
+            <NavRow
+              key={`emptied-${h.gameId}`}
+              dot="conflict"
+              label={`Save files gone — ${h.gameName}`}
+              description="Every save file is gone from this Deck. Nothing syncs for it until you restore it or delete it everywhere."
+              onOpen={() => openEmptiedHoldModal(h, () => { void refreshEmptied(); void refreshStatus() })}
             />
           ))}
           {warnings.map((w) => (
