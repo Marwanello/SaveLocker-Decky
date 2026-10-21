@@ -17,6 +17,7 @@ import { persistSyncOnOpen, resolvePullEnabled } from './gamingSync'
 import { classifySyncOutput } from './syncStatus'
 import { installStagedUpdate } from './stagedUpdate'
 import { DlcHolds } from './dlcHolds'
+import { EmptiedHolds } from './emptiedHolds'
 import { KIND_STYLE, saveLockerToast, type ToastKind } from './toast'
 
 /**
@@ -426,6 +427,7 @@ function StatusPage() {
           offer exactly those two lives there; re-rendering the same data as bespoke rows here would
           be a copy that can drift. It renders nothing when there are no holds. */}
       <DlcHolds />
+      <EmptiedHolds />
 
       <Section title="Quick actions">
         <DialogButton
