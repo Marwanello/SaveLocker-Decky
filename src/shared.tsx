@@ -101,6 +101,11 @@ export interface TrackedGame {
   /** Gaming Mode pre-launch-pull override: null means "use the computed default" — see
    * `gamingSync.tsx`'s `resolvePullEnabled`. */
   pullBeforeLaunchEnabled: boolean | null
+  /** Playthroughs (SaveLocker tasks/save-playthroughs): the line of saves this device follows for the game, and how
+   * many the agent last saw. Null id = the game's default. Absent on an agent that predates playthroughs. */
+  playthroughId?: string | null
+  playthroughName?: string | null
+  playthroughCount?: number
 }
 
 /** What the agent's `SyncActivityTracker` reports right now, and its short rolling history — the
