@@ -16,6 +16,7 @@ import { FullPage, SAVELOCKER_PAGE_ROUTE } from './fullPage'
 import { openDlcHoldModal, useDlcHolds } from './dlcHolds'
 import { openEmptiedHoldModal, useEmptiedHolds } from './emptiedHolds'
 import { installStagedUpdate } from './stagedUpdate'
+import { PlaythroughDropdown } from './playthroughs'
 import { KIND_STYLE, saveLockerToast, type ToastKind } from './toast'
 import {
   applyAll, fetchActivity, fetchGames, fetchState, fetchVersion, runDoctor, runSync, timeAgo,
@@ -269,9 +270,11 @@ function confirmForce(action: 'push' | 'pull', target: string | null, onStarted:
 }
 
 /** "Advanced" — the one-direction and force actions, one press below the panel's single Sync now. */
-function SyncOptionsModal({ target, onStarted, closeModal }: {
+function SyncOptionsModal({ target, game, onStarted, onSwitched, closeModal }: {
   target: string | null
+  game: TrackedGame | null
   onStarted: () => void
+  onSwitched: () => void
   closeModal?: () => void
 }) {
   const run = (action: 'sync' | 'push' | 'pull') => {
@@ -288,6 +291,7 @@ function SyncOptionsModal({ target, onStarted, closeModal }: {
   return (
     <QamDialog title="Sync options" sub={target ?? 'All games'} closeModal={closeModal}>
       <Focusable style={{ display: 'flex', flexDirection: 'column', gap: '10px' }} flow-children="down">
+        <PlaythroughDropdown game={game} count={game?.playthroughCount} onChanged={onSwitched} />
         <DialogButton onClick={() => run('sync')}>Sync now (pull, then push)</DialogButton>
         <Focusable style={{ display: 'flex', gap: '10px' }} flow-children="right">
           <DialogButton style={half} onClick={() => run('push')}>Push only</DialogButton>
@@ -664,6 +668,7 @@ function Content() {
   const stagedBlocked = version?.stagedBlockedReason ?? null
   const down = reach.kind === 'down'
   const targetName = target ?? 'all games'
+  const targetGame = target ? games.find((g) => g.name === target) ?? null : null
   // A sync needs a reachable agent and something to sync; an install restarts the agent under it.
   const syncDisabled = run.busy !== null || run.installing || down || reach.kind === 'loading'
     || (state !== null && state.gamesTracked === 0)
@@ -764,6 +769,16 @@ function Content() {
             }}
           />
         </PanelSectionRow>
+        {targetGame && (
+          <PanelSectionRow>
+            <PlaythroughDropdown
+              game={targetGame}
+              count={targetGame.playthroughCount}
+              disabled={run.busy !== null || run.installing || down}
+              onChanged={() => void refreshStatus()}
+            />
+          </PanelSectionRow>
+        )}
         <PanelSectionRow>
           <ButtonItem layout="below" disabled={syncDisabled} onClick={() => void runSyncAction('sync', target, false, pokeActivity)}>
             {run.busy ? 'Syncing…' : target ? `Sync ${targetName}` : 'Sync now'}
@@ -783,7 +798,7 @@ function Content() {
             description="Push or pull one direction, force actions"
             onOpen={() => {
               if (syncDisabled) return
-              showModal(<SyncOptionsModal target={target} onStarted={pokeActivity} />)
+              showModal(<SyncOptionsModal target={target} game={targetGame} onStarted={pokeActivity} onSwitched={() => void refreshStatus()} />)
             }}
           />
         )}

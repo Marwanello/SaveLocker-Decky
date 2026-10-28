@@ -55,6 +55,16 @@ variables, or passing its own arguments keeps all of it — the wrapper is subst
 the most common setup mistake: Game Mode does not put `~/.local/bin` on `PATH`, so the short form
 silently stops the game launching.
 
+### Playthroughs
+
+A game can have several named lines of saves (a second run, a different build), and each device follows
+one. A game with more than one shows a **playthrough dropdown** on its row in **Games** (under its poster
+in Grid), in the Quick Access panel under the selected game, and in its **Sync options** dialog. Picking
+another asks once, uploads the current save to its own playthrough, restores the other, and ends in a
+result dialog. It is refused, with the reason, while the game runs or a conflict is open. The plugin only
+asks: the agent (v0.9.0 or newer) does the switch. **Games** also has a game icon on each row and a
+List / Grid toggle (Steam's own art by app id, else the server's cover).
+
 ### Install update now
 
 When the agent has an update **downloaded and verified**, an **Update** section appears with an

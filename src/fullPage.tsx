@@ -18,6 +18,8 @@ import { classifySyncOutput } from './syncStatus'
 import { installStagedUpdate } from './stagedUpdate'
 import { DlcHolds } from './dlcHolds'
 import { EmptiedHolds } from './emptiedHolds'
+import { GameArt } from './gameArt'
+import { PlaythroughButton, hasPlaythroughs } from './playthroughs'
 import { KIND_STYLE, saveLockerToast, type ToastKind } from './toast'
 
 /**
@@ -451,12 +453,30 @@ function StatusPage() {
  * A green "in sync" beside every row here would be an invention, and one the user would discover
  * was invented the first time a conflict appeared under it.
  */
+type GamesView = 'list' | 'grid'
+const GAMES_VIEW_KEY = 'savelocker.gamesView'
+let gamesViewNow: GamesView | null = null
+
+/** The view last chosen, kept for the session and across restarts. Storage can be absent in Steam's context, so it is optional. */
+function savedGamesView(): GamesView {
+  if (gamesViewNow) return gamesViewNow
+  try { gamesViewNow = window.localStorage.getItem(GAMES_VIEW_KEY) === 'grid' ? 'grid' : 'list' } catch { gamesViewNow = 'list' }
+  return gamesViewNow
+}
+
+function rememberGamesView(v: GamesView): void {
+  gamesViewNow = v
+  try { window.localStorage.setItem(GAMES_VIEW_KEY, v) } catch { /* the choice just lasts for this session */ }
+}
+
 function GamesPage() {
   const [games, setGames] = useState<TrackedGame[]>([])
   const [machineId, setMachineId] = useState<string | null>(null)
   const [syncOnOpenOverrides, setSyncOnOpenOverrides] = useState<Record<string, boolean>>({})
   const [search, setSearch] = useState('')
+  const [view, setView] = useState<GamesView>(savedGamesView)
   const conflicts = useOpenConflicts()
+  const chooseView = (next: GamesView) => { setView(next); rememberGamesView(next) }
 
   const refresh = async () => {
     const [g, s, o] = await Promise.all([fetchGames(), fetchState(), fetchSyncOnOpenOverrides()])
@@ -494,35 +514,63 @@ function GamesPage() {
   return (
     <Section title="Games">
       <TextField label="Search games" value={search} onChange={(e: any) => setSearch(e?.target?.value ?? '')} />
-      <div style={{ ...DIM, fontSize: '12px', padding: '6px 0 10px' }}>
-        {query === '' ? `${games.length} tracked` : `${filtered.length} of ${games.length}`}
-      </div>
+      <Focusable style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '6px 0 10px' }} flow-children="right">
+        <div style={{ ...DIM, fontSize: '12px' }}>
+          {query === '' ? `${games.length} tracked` : `${filtered.length} of ${games.length}`}
+        </div>
+        <div style={{ display: 'flex', gap: '8px' }}>
+          <DialogButton style={{ ...SMALL_BUTTON, opacity: view === 'list' ? 1 : 0.55 }} onClick={() => chooseView('list')}>List</DialogButton>
+          <DialogButton style={{ ...SMALL_BUTTON, opacity: view === 'grid' ? 1 : 0.55 }} onClick={() => chooseView('grid')}>Grid</DialogButton>
+        </div>
+      </Focusable>
       {/* flow-children="down": the gamepad must step row-to-row; without a forced vertical flow
           Steam's default navigation considers a row's children (the chip) before moving past the
           row, which turns "down" into an extra stop per game. */}
-      <Focusable flow-children="down">
-        {filtered.length === 0 && (
-          <div style={{ ...DIM, padding: '8px 0' }}>
-            {games.length === 0 ? 'No tracked games yet.' : `No games match "${search.trim()}".`}
-          </div>
-        )}
-        {filtered.map((g) => {
-          const conflict = conflicts.find((c) => c.gameId === g.gameId)
-          return (
-            <Field
-              key={g.gameId}
-              focusable
-              bottomSeparator="standard"
-              label={g.name}
-              description={`alias: ${g.alias ?? g.name} · ${g.hasSteamCloud ? 'Steam Cloud' : 'no Steam Cloud'}`}
-              onActivate={() => openGame(g)}
-              onClick={() => openGame(g)}
-            >
-              {conflict && <Chip kind="conflict">Save conflict</Chip>}
-            </Field>
-          )
-        })}
-      </Focusable>
+      {filtered.length === 0 && (
+        <div style={{ ...DIM, padding: '8px 0' }}>
+          {games.length === 0 ? 'No tracked games yet.' : `No games match "${search.trim()}".`}
+        </div>
+      )}
+      {view === 'list' ? (
+        <Focusable flow-children="down">
+          {filtered.map((g) => {
+            const conflict = conflicts.find((c) => c.gameId === g.gameId)
+            return (
+              <Field
+                key={g.gameId}
+                focusable
+                bottomSeparator="standard"
+                icon={<GameArt game={g} kind="icon" width={40} height={40} />}
+                label={g.name}
+                description={`alias: ${g.alias ?? g.name} · ${g.hasSteamCloud ? 'Steam Cloud' : 'no Steam Cloud'}${hasPlaythroughs(g) ? ` · ${g.playthroughCount} playthroughs` : ''}`}
+                onActivate={() => openGame(g)}
+                onClick={() => openGame(g)}
+              >
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  {conflict && <Chip kind="conflict">Save conflict</Chip>}
+                  <PlaythroughButton game={g} count={g.playthroughCount} selectedName={g.playthroughName} onChanged={() => void refresh()} />
+                </div>
+              </Field>
+            )
+          })}
+        </Focusable>
+      ) : (
+        <Focusable style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: '14px' }}>
+          {filtered.map((g) => {
+            const conflict = conflicts.find((c) => c.gameId === g.gameId)
+            return (
+              <Focusable key={g.gameId} style={{ display: 'flex', flexDirection: 'column', gap: '6px', minWidth: 0, width: '100%' }} flow-children="down">
+                <Focusable onActivate={() => openGame(g)} onClick={() => openGame(g)} style={{ position: 'relative', width: '100%' }}>
+                  <GameArt game={g} kind="grid" width={120} height={180} />
+                  {conflict && <div style={{ position: 'absolute', top: '4px', left: '4px' }}><Chip kind="conflict">Conflict</Chip></div>}
+                </Focusable>
+                <PlaythroughButton game={g} count={g.playthroughCount} selectedName={g.playthroughName} onChanged={() => void refresh()} fullWidth />
+                <div style={{ fontSize: '12px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{g.name}</div>
+              </Focusable>
+            )
+          })}
+        </Focusable>
+      )}
     </Section>
   )
 }

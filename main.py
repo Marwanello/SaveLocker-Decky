@@ -16,6 +16,7 @@ that file as the desktop user. Read the token; write nothing there.
 """
 
 import asyncio
+import base64
 import json
 import os
 import urllib.error
@@ -72,6 +73,31 @@ def _request(path: str, payload=None, timeout: int = TIMEOUT):
         return {"ok": False, "reason": "unreachable"}
     except json.JSONDecodeError:
         return {"ok": False, "reason": "bad-response"}
+
+
+def _request_art(path: str, timeout: int = 10):
+    """
+    A cover or icon from the agent's art relay, as a `data:` URL the Games page can put in an `<img>`.
+    The frontend cannot fetch it itself (foreign origin, no token), and the response is image bytes,
+    not JSON, so it does not go through `_request`.
+    """
+    token = _token()
+    if token is None:
+        return {"ok": False, "reason": "no-agent"}
+    request = urllib.request.Request(AGENT + path, method="GET")
+    request.add_header("X-SaveLocker-Token", token)
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            content_type = response.headers.get("Content-Type", "image/png")
+            raw = response.read()
+        encoded = base64.b64encode(raw).decode("ascii")
+        return {"ok": True, "data": "data:%s;base64,%s" % (content_type, encoded)}
+    except urllib.error.HTTPError as err:
+        return {"ok": False, "reason": f"http-{err.code}"}
+    except TimeoutError:
+        return {"ok": False, "reason": "timeout"}
+    except (urllib.error.URLError, OSError):
+        return {"ok": False, "reason": "unreachable"}
 
 
 def _normalize_game(game: dict) -> dict:
@@ -364,6 +390,31 @@ class Plugin:
         if result["ok"] and result["data"] is not None:
             result["data"] = [_normalize_game(g) for g in result["data"]]
         return result
+
+    async def playthroughs(self, game_id: str):
+        """
+        A game's playthroughs as the agent sees them: the server's list (empty when the server cannot be
+        reached), which one this device follows, and whether the switch is waiting to reach the server.
+        The agent asks the server, so this can take a moment: off-thread like the other slow routes.
+        """
+        return await asyncio.to_thread(_request, "/api/games/%s/playthroughs" % game_id, timeout=15)
+
+    async def switch_playthrough(self, game_id: str, playthrough_id: str):
+        """
+        Put this device on another playthrough of a game. The agent does the whole switch (pushes the
+        outgoing save to its own line, then restores the other one) and answers with the finished result;
+        a refusal ("the game is running", "a conflict is open") comes back as `ok: false` with its reason in
+        `message`, not as an HTTP error. A restore of a big save is slow, so the long timeout and the thread
+        are the same as sync()'s reasons.
+        """
+        return await asyncio.to_thread(
+            _request, "/api/games/%s/playthroughs/%s/switch" % (game_id, playthrough_id), {}, timeout=600)
+
+    async def game_art(self, game_id: str, kind: str, width: int):
+        """A game's cover (`grid`) or icon (`icon`) from the server, relayed by the agent and cached by it."""
+        if kind not in ("grid", "icon"):
+            return {"ok": False, "reason": "bad-kind"}
+        return await asyncio.to_thread(_request_art, "/api/games/%s/art?kind=%s&w=%d" % (game_id, kind, int(width)))
 
     async def set_alias(self, game_id: str, alias: str | None):
         """
