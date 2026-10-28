@@ -559,12 +559,12 @@ function GamesPage() {
           {filtered.map((g) => {
             const conflict = conflicts.find((c) => c.gameId === g.gameId)
             return (
-              <Focusable key={g.gameId} style={{ display: 'flex', flexDirection: 'column', gap: '6px', minWidth: 0 }} flow-children="down">
-                <Focusable onActivate={() => openGame(g)} onClick={() => openGame(g)} style={{ position: 'relative' }}>
+              <Focusable key={g.gameId} style={{ display: 'flex', flexDirection: 'column', gap: '6px', minWidth: 0, width: '100%' }} flow-children="down">
+                <Focusable onActivate={() => openGame(g)} onClick={() => openGame(g)} style={{ position: 'relative', width: '100%' }}>
                   <GameArt game={g} kind="grid" width={120} height={180} />
                   {conflict && <div style={{ position: 'absolute', top: '4px', left: '4px' }}><Chip kind="conflict">Conflict</Chip></div>}
                 </Focusable>
-                <PlaythroughButton game={g} count={g.playthroughCount} selectedName={g.playthroughName} onChanged={() => void refresh()} />
+                <PlaythroughButton game={g} count={g.playthroughCount} selectedName={g.playthroughName} onChanged={() => void refresh()} fullWidth />
                 <div style={{ fontSize: '12px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{g.name}</div>
               </Focusable>
             )

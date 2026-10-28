@@ -249,11 +249,14 @@ function blockedReason(to: Playthrough): string | null {
  * The small dropdown button on a Games row and under a poster in Grid: the playthrough this Deck plays, a
  * chevron, and a menu of the others. Renders nothing for a game with only one playthrough.
  */
-export function PlaythroughButton({ game, count, selectedName, onChanged }: {
+export function PlaythroughButton({ game, count, selectedName, onChanged, fullWidth }: {
   game: SwitchGame
   count: number | null | undefined
   selectedName?: string | null
   onChanged?: () => void
+  /** Grid's tile is a narrow CSS-grid column rather than a row with room to spare — stretch to it
+   * and truncate the label instead of overflowing, same as the game name underneath. */
+  fullWidth?: boolean
 }) {
   const multi = hasPlaythroughs({ playthroughCount: count })
   const { list, reload } = usePlaythroughs(multi ? game.gameId : null)
@@ -301,10 +304,13 @@ export function PlaythroughButton({ game, count, selectedName, onChanged }: {
   return (
     <DialogButton
       onClick={open}
-      style={{ width: 'auto', minWidth: 0, padding: '6px 12px', flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: '8px', fontSize: '13px' }}
+      style={{
+        width: fullWidth ? '100%' : 'auto', minWidth: 0, padding: '6px 12px', flexShrink: fullWidth ? undefined : 0,
+        display: 'inline-flex', alignItems: 'center', gap: '8px', fontSize: '13px',
+      }}
     >
-      {label}
-      <FaChevronDown style={{ fontSize: '10px', opacity: 0.7 }} />
+      <span style={{ minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{label}</span>
+      <FaChevronDown style={{ fontSize: '10px', opacity: 0.7, flexShrink: 0 }} />
     </DialogButton>
   )
 }

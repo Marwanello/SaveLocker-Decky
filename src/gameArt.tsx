@@ -61,11 +61,21 @@ export function GameArt({ game, kind, width, height }: {
     return () => { alive = false }
   }, [stage, game.gameId, kind])
 
-  const box = {
-    width: `${width}px`, height: `${height}px`, borderRadius: kind === 'icon' ? '6px' : '4px',
-    flexShrink: 0, overflow: 'hidden', background: '#2a2f35',
-    display: 'flex', alignItems: 'center', justifyContent: 'center',
-  } as const
+  // Icon (a fixed 40x40 beside a list row's text) keeps its pixel size. Grid sizes itself off the
+  // CSS grid column instead — a fixed pixel width here left the art off the actual column width
+  // whenever the page wasn't exactly 5 * (120px + gap) wide, which is what made Grid look broken.
+  // width/height remain the letter tile's font-size hint (close enough to the real rendered size).
+  const box = kind === 'icon'
+    ? {
+        width: `${width}px`, height: `${height}px`, borderRadius: '6px',
+        flexShrink: 0, overflow: 'hidden', background: '#2a2f35',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+      } as const
+    : {
+        width: '100%', aspectRatio: `${width} / ${height}`, borderRadius: '4px',
+        overflow: 'hidden', background: '#2a2f35',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+      } as const
 
   if (stage === 0 && game.steamAppId) {
     return (
