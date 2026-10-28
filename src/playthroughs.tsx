@@ -84,21 +84,25 @@ export function loadPlaythroughs(gameId: string, force = false): Promise<GamePla
   return p
 }
 
-/** One game's list, loaded on mount. `reload` skips the memory (after a switch). */
-export function usePlaythroughs(gameId: string | null): { list: GamePlaythroughs | null; reload: () => void } {
+/** One game's list, loaded on mount. `reload` skips the memory (after a switch) unless told the memory is fresh. */
+export function usePlaythroughs(gameId: string | null): { list: GamePlaythroughs | null; reload: (force?: boolean) => void } {
   const [list, setList] = useState<GamePlaythroughs | null>(null)
-  const [tick, setTick] = useState(0)
+  const [tick, setTick] = useState({ n: 0, force: false })
   useEffect(() => {
     if (!gameId) { setList(null); return }
     let alive = true
-    void loadPlaythroughs(gameId, tick > 0).then((l) => { if (alive) setList(l) })
+    void loadPlaythroughs(gameId, tick.force).then((l) => { if (alive) setList(l) })
     return () => { alive = false }
   }, [gameId, tick])
-  return { list, reload: () => setTick((t) => t + 1) }
+  return { list, reload: (force = true) => setTick((t) => ({ n: t.n + 1, force })) }
 }
 
 /** The playthroughs a device can be put on: archived ones are out of the picker (the console un-archives them). */
 export const choices = (l: GamePlaythroughs): Playthrough[] => l.playthroughs.filter((p) => p.archivedAt === null)
+
+/** The one this Deck plays: a null `selectedId` means the game's default. */
+const selectedOf = (l: GamePlaythroughs): Playthrough | null =>
+  l.playthroughs.find((p) => (l.selectedId ? p.id === l.selectedId : p.isDefault)) ?? null
 
 const ago = (iso: string | undefined): string => {
   if (!iso) return 'no save yet'
@@ -114,8 +118,8 @@ function reasonText(reason: string): string {
   if (reason === 'no-agent') return 'SaveLocker is not installed on this Deck.'
   if (reason === 'unreachable') return 'The SaveLocker agent is not running.'
   if (reason === 'timeout') return 'The agent did not answer in time. Check the activity page before trying again.'
-  // The agent predates playthroughs: the route is simply not there.
-  if (reason === 'http-404') return 'This SaveLocker agent is too old to switch playthroughs. Update it first.'
+  // An agent that predates playthroughs has no such route; a game it no longer tracks is a 404 too.
+  if (reason === 'http-404') return "The SaveLocker agent doesn't know this game, or is older than v0.9.0 and has no playthroughs. Update it, then try again."
   if (reason === 'http-409') return 'A sync of this game is already running. Try again when it has finished.'
   return `The agent answered with an error (${reason}).`
 }
@@ -149,17 +153,24 @@ function SwitchModal({ game, from, to, onFinished, closeModal }: {
   useEffect(() => {
     const startedAt = Date.now()
     let alive = true
-    let timer: ReturnType<typeof setTimeout>
+    let done = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    // Stops once the switch has answered, after one last read: the feed is shared, and a result dialog left open
+    // would otherwise keep collecting lines from whatever syncs next.
     const poll = async () => {
+      const last = done
       const a = await fetchActivity()
       if (!alive) return
       if (a.ok) setSteps(stepsSince(a.data.recent, startedAt))
-      timer = setTimeout(() => void poll(), 1000)
+      if (!last) timer = setTimeout(() => void poll(), 1000)
     }
     void poll()
     void (async () => {
       const r = await switchPlaythrough(game.gameId, to.id)
       if (!alive) return
+      done = true
+      clearTimeout(timer)
+      void poll()
       forget(game.gameId)
       if (!r.ok) { setPhase('fail'); setMessage(reasonText(r.reason)); onFinished(false); return }
       setPhase(r.data.ok ? 'ok' : 'fail')
@@ -249,11 +260,20 @@ export function PlaythroughButton({ game, count, selectedName, onChanged }: {
   if (!multi) return null
 
   const options = list ? choices(list) : []
-  const current = list ? options.find((p) => p.id === list.selectedId) ?? null : null
+  const current = list ? selectedOf(list) : null
   const label = current?.name ?? list?.selectedName ?? selectedName ?? 'Playthrough'
 
   const open = (e: any) => {
-    if (!list) return
+    // The button sits inside a Games row whose own click opens the game page; the press is this button's alone.
+    e?.stopPropagation?.()
+    if (!list) {
+      // Still loading, or the load failed (agent stopped, or too old to have playthroughs): say so instead of doing nothing.
+      void loadPlaythroughs(game.gameId, true).then((l) => {
+        if (l) reload(false)
+        else saveLockerToast('blocked', 'Cannot list playthroughs', 'The SaveLocker agent did not answer. It needs v0.9.0 or newer.')
+      })
+      return
+    }
     if (list.offline || options.length === 0) {
       saveLockerToast('blocked', 'Cannot list playthroughs', 'The server is not reachable from this Deck.')
       return
@@ -263,14 +283,14 @@ export function PlaythroughButton({ game, count, selectedName, onChanged }: {
         {options.map((p) => (
           <MenuItem
             key={p.id}
-            selected={p.id === list.selectedId}
+            selected={p.id === current?.id}
             onSelected={() => {
               const why = blockedReason(p)
               if (why) { saveLockerToast('blocked', 'Cannot switch', why); return }
               confirmSwitch(game, current, p, () => { reload(); onChanged?.() })
             }}
           >
-            {p.id === list.selectedId ? '✓ ' : ''}{p.name} · {ago(p.head?.createdAt)}
+            {p.id === current?.id ? '✓ ' : ''}{p.name} · {ago(p.head?.createdAt)}
           </MenuItem>
         ))}
       </Menu>,
@@ -281,7 +301,6 @@ export function PlaythroughButton({ game, count, selectedName, onChanged }: {
   return (
     <DialogButton
       onClick={open}
-      onOKButton={open}
       style={{ width: 'auto', minWidth: 0, padding: '6px 12px', flexShrink: 0, display: 'inline-flex', alignItems: 'center', gap: '8px', fontSize: '13px' }}
     >
       {label}
@@ -302,18 +321,19 @@ export function PlaythroughDropdown({ game, count, onChanged, disabled }: {
 }) {
   const multi = game !== null && hasPlaythroughs({ playthroughCount: count })
   const { list, reload } = usePlaythroughs(multi ? game.gameId : null)
+  // Offline the list is empty, so the row hides rather than offering nothing.
   if (!multi || !game || !list) return null
   const options = choices(list)
   if (options.length < 2) return null
-  const current = options.find((p) => p.id === list.selectedId) ?? null
+  const current = selectedOf(list)
 
   return (
     <DropdownItem
       label="Playthrough"
       description={`${options.length} for this game · switching uploads ${current?.name ?? 'the current one'} first`}
-      disabled={disabled || list.offline}
+      disabled={disabled}
       rgOptions={options.map((p) => ({ data: p.id, label: `${p.name} · ${ago(p.head?.createdAt)}` }))}
-      selectedOption={list.selectedId ?? undefined}
+      selectedOption={current?.id}
       onChange={(o: any) => {
         // Steam's own Dropdown, resolved out of CommonUIModule by shape: accept the option object or a bare value.
         const picked = o && typeof o === 'object' && 'data' in o ? o.data : o

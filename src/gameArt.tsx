@@ -23,10 +23,16 @@ function loadServerArt(gameId: string, kind: 'grid' | 'icon', width: number): Pr
   if (serverArt.has(key)) return Promise.resolve(serverArt.get(key) ?? null)
   const hit = pending.get(key)
   if (hit) return hit
+  // Only a picture or the agent's 404 (the server has none) is remembered: a stopped agent or a timeout is tried
+  // again on the next mount instead of leaving a letter tile for the rest of the session.
   const p = fetchArt(gameId, kind, width)
-    .then((r) => (r.ok ? r.data : null))
+    .then((r) => {
+      const v = r.ok ? r.data : null
+      if (r.ok || r.reason === 'http-404') serverArt.set(key, v)
+      return v
+    })
     .catch(() => null)
-    .then((v) => { serverArt.set(key, v); pending.delete(key); return v })
+    .finally(() => pending.delete(key))
   pending.set(key, p)
   return p
 }
